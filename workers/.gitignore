@@ -3,7 +3,7 @@ node_modules
 .wrangler
 .env
 # Frontend files (downloaded during deployment/development)
-public/web-vault/
+public/web-vault
 
 # reference repos
 vaultwarden/
@@ -19,3 +19,6 @@ sql/global_domains_seed.sql
 .claude/
 # Build output
 build/
+
+# Local secrets for wrangler dev
+.dev.vars
