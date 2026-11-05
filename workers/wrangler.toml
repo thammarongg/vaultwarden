@@ -1,0 +1,188 @@
+name = "vaultwarden-cf"
+main = "src/entry.js"
+compatibility_date = "2025-09-19"
+keep_vars = true
+workers_dev = true
+preview_urls = false
+
+[durable_objects]
+bindings = [
+  # Offload CPU-heavy endpoints to Durable Objects 
+  # (100,000 requests, 13,000 GB-s duration / day in free plan),
+  # while keeping the main Worker fast for the rest.
+  #
+  # - HEAVY_DO: Rust DO, reuses existing axum router for CPU-heavy endpoints (import/login/password verify).
+  { name = "HEAVY_DO", class_name = "HeavyDo" },
+  { name = "NOTIFY_DO", class_name = "NotifyDo" }
+]
+
+[[migrations]]
+tag = "do_v1"
+new_sqlite_classes = ["HeavyDo"]
+
+[[migrations]]
+tag = "do_v2"
+new_sqlite_classes = ["NotifyDo"]
+
+[build]
+command = "cargo install --locked -q worker-build --version 0.8.5 && worker-build --release --locked"
+
+# Rate limiting configuration for protecting sensitive endpoints
+# See: https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/
+[[ratelimits]]
+name = "LOGIN_RATE_LIMITER"
+# A unique identifier for this rate limiter within your Cloudflare account
+# You can use any positive integer
+namespace_id = "1001"
+# Allow 5 requests per 60 seconds per key (email or IP)
+# This prevents brute force attacks while allowing legitimate login attempts
+simple = { limit = 5, period = 60 }
+
+[[ratelimits]]
+name = "SEND_ACCESS_RATE_LIMITER"
+namespace_id = "1003"
+# Allow 15 password attempts per minute per IP for public Send access.
+simple = { limit = 15, period = 60 }
+
+# Static assets configuration for serving frontend
+# Frontend files (bw_web_builds) are expected under ./public/web-vault before deployment
+[assets]
+directory = "./public/web-vault"
+not_found_handling = "404-page"
+html_handling = "auto-trailing-slash"
+# Only invoke Worker for API and Identity routes, serve static files directly for other routes
+run_worker_first = ["/api/*", "/identity/*", "/notifications/*"]
+
+[vars]
+# Show the "Create account" button; the server still only accepts emails matching the ALLOWED_EMAILS secret.
+DISABLE_USER_REGISTRATION = "false"
+
+# Base URL for the worker, used for generating up/down URLs for files.
+# If not set, the base URL will be extracted from the incoming request.
+# BASE_URL = "https://vault.example.com"
+
+# Server-side password hashing PBKDF2 iterations (stored per-user).
+# Defaults to 600000, and will be clamped to a minimum of 600000 even if set lower.
+# Existing users whose password iterations are less than this value will be upgraded on login.
+# PASSWORD_ITERATIONS = "600000"
+
+# Base delay in milliseconds before returning invalid credentials for a non-existent login user.
+# Defaults to 550, with a random ±30ms jitter; tune to the observed PBKDF2 duration.
+# LOGIN_MISSING_USER_DELAY_MS = "550"
+
+# Optional: Set the batch size for imports. Defaults to 30 if not set.
+# Set to 0 means no batching (all records imported in a single batch).
+# IMPORT_BATCH_SIZE = "30"
+
+# Cipher sync/list JSON query mode.
+# If enabled, fetch cipher JSON per-row and build the JSON array in the Worker
+# to avoid D1/SQLite `SQLITE_TOOBIG` errors on very large vaults.
+# Defaults to false (use `json_group_array` and fallback automatically on `SQLITE_TOOBIG`).
+# CIPHERS_DEFAULT_ROW_QUERY = "true"
+
+# Optional: preallocate the `/api/sync` response String capacity (bytes).
+# If unset/invalid, the Worker uses a default capacity and grows as needed.
+# SYNC_RESPONSE_PREALLOC_BYTES = "1048576"
+
+# Push Notification Configuration (optional)
+# PUSH_ENABLED = "false"
+# PUSH_RELAY_URI = "https://push.bitwarden.com"
+# PUSH_IDENTITY_URI = "https://identity.bitwarden.com"
+
+# Number of days to keep soft-deleted items before auto-purging.
+# Defaults to 30 days if not set. Set to 0 to disable auto-purge.
+# TRASH_AUTO_DELETE_DAYS = "30"
+
+# Attachment configuration (optional)
+# Maximum size for individual attachment files in bytes.
+# Defaults to no limit if not set.
+# ATTACHMENT_MAX_BYTES = "104857600"  # 100MB
+
+# Maximum total attachment storage per user in KB.
+# Defaults to no limit if not set.
+# ATTACHMENT_TOTAL_LIMIT_KB = "1048576"  # 1GB
+
+# Number of seconds to keep attachment upload and download URLs valid.
+# Defaults to 300 seconds (5 minutes) if not set.
+# ATTACHMENT_TTL_SECS = "300"
+
+# Cron triggers for scheduled tasks
+# Runs daily at 03:00 UTC to purge soft-deleted ciphers
+[triggers]
+crons = ["0 3 * * *"]
+
+[[d1_databases]]
+binding = "vault1"
+database_name = "vaultwarden-cf"
+database_id = "9f837f1b-2b18-4ec6-a18d-471ad2a0861b"
+migrations_dir = "migrations"
+
+# R2 bucket for file attachments (optional, requires credit card)
+# R2 has priority: if R2 is configured, KV is ignored.
+# R2 supports larger files and streaming uploads.
+# Uncomment and configure this section to enable file attachments via R2:
+[[r2_buckets]]
+binding = "ATTACHMENTS_BUCKET"
+bucket_name = "vaultwarden-cf-attachments"
+
+# KV namespace for file attachments (optional, no credit card required)
+# KV has a 25MB limit per file, but doesn't require credit card binding.
+# If R2 is not configured, KV will be used for attachments.
+# [[kv_namespaces]]
+# binding = "ATTACHMENTS_KV"
+
+[env.dev]
+name = "warden-worker-dev"
+workers_dev = false
+preview_urls = false
+
+[env.dev.vars]
+
+[env.dev.durable_objects]
+bindings = [
+  { name = "HEAVY_DO", class_name = "HeavyDo" },
+  { name = "NOTIFY_DO", class_name = "NotifyDo" }
+]
+
+# Dev environment also needs cron triggers
+[env.dev.triggers]
+crons = ["0 3 * * *"]
+
+# Rate limiting for dev environment (same settings as production)
+[[env.dev.ratelimits]]
+name = "LOGIN_RATE_LIMITER"
+namespace_id = "1002"
+simple = { limit = 5, period = 60 }
+
+[[env.dev.ratelimits]]
+name = "SEND_ACCESS_RATE_LIMITER"
+namespace_id = "1004"
+simple = { limit = 10, period = 60 }
+
+[[env.dev.d1_databases]]
+binding = "vault1"
+database_name = "vault1-dev"
+database_id = "${D1_DATABASE_ID_DEV}"
+migrations_dir = "migrations"
+
+# R2 bucket for file attachments in dev environment (optional, requires credit card)
+# [[env.dev.r2_buckets]]
+# binding = "ATTACHMENTS_BUCKET"
+# bucket_name = "warden-attachments-dev"
+
+# KV namespace for file attachments in dev environment (optional, no credit card required)
+[[env.dev.kv_namespaces]]
+binding = "ATTACHMENTS_KV"
+
+# logs
+[env.dev.observability]
+[env.dev.observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+persist = true
+
+[env.dev.observability.traces]
+enabled = false
+persist = true
+head_sampling_rate = 1

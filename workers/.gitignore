@@ -1,0 +1,21 @@
+target
+node_modules
+.wrangler
+.env
+# Frontend files (downloaded during deployment/development)
+public/web-vault/
+
+# reference repos
+vaultwarden/
+bw_web_builds/
+
+# Generated seed SQL (global equivalent domains)
+sql/global_domains_seed.sql
+
+# Coding assistant
+.ace-tool/
+.codex/
+.cursor/
+.claude/
+# Build output
+build/

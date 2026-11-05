@@ -1,0 +1,9 @@
+[toolchain]
+# Pin the toolchain to keep builds reproducible across machines/CI.
+# Update this intentionally (and together with Cargo.lock) when you want to upgrade.
+channel = "1.91.1"
+profile = "minimal"
+components = ["rustfmt", "clippy","rust-analyzer"]
+targets = ["wasm32-unknown-unknown"]
+
+
