@@ -294,8 +294,8 @@ bash import-r2.sh
 
 4. Delete `import.sql` and `import-r2.sh` afterwards: they contain the (encrypted) vault.
 
-Emails being imported must be allowed to log in only if they are in `ALLOWED_EMAILS` for new
-registrations; existing accounts log in regardless. `tests/import_check.sh` runs the whole flow
+Imported accounts can log in even if they are not in `ALLOWED_EMAILS` (that list only gates
+new registrations). `tests/import_check.sh` runs the whole flow
 against a real vaultwarden in docker.
 
 ## Local Development with D1
