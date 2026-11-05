@@ -102,8 +102,15 @@ pub async fn get_sync_data(
     let folders_json = serde_json::to_string(&folders).map_err(|_| AppError::Internal)?;
 
     // Build response JSON via string concatenation (ciphers already raw JSON)
+    let user_key_id: Option<String> = db
+        .prepare("SELECT key_id FROM users WHERE uuid = ?1")
+        .bind(&[user_id.clone().into()])?
+        .first(Some("key_id"))
+        .await
+        .map_err(|_| AppError::Database)?;
     let user_decryption_json = serde_json::to_string(&json!({
-        "masterPasswordUnlock": master_password_unlock
+        "masterPasswordUnlock": master_password_unlock,
+        "userKeyId": user_key_id,
     }))
     .map_err(|_| AppError::Internal)?;
 

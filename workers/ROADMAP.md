@@ -68,7 +68,7 @@ is the reference implementation for porting features.
 ## Backlog from the daily security/update watch
 
 - Port vaultwarden #7563 (2FA userVerificationToken) before moving the web vault past
-  v2026.6.4 (web vault 2026.7.1+ needs it to toggle 2FA).
+  done (2FA userVerificationToken API); web vault now v2026.10.1.
 - Port #7450 (attachment v2 quota), #7777 (don't leak internal errors to clients; D1
   error text currently reaches clients on 500s). #7837 done (`db::delete_user_rows`).
 - Phase 3 gaps: org attachments not counted against a quota; no "removed from org" email
@@ -77,3 +77,13 @@ is the reference implementation for porting features.
 ## Open decisions
 
 - Upstream: how to keep pulling fixes from warden-worker now that the schema diverged.
+
+## Phase 4 (branch `backlog-phase4`, tested locally 2026-11-05)
+
+- #7777 generic client errors; #7634 password payload; #7693 user key id.
+- Import from vaultwarden: `scripts/import_vaultwarden.py`, `tests/import_check.sh` (docker 1.37.5).
+- Emergency access (lazy + cron expiry), email 2FA, WebAuthn 2FA (WebCrypto, no webauthn-rs),
+  admin page `/admin` (ADMIN_TOKEN secret).
+- Checked in the real web vault 2026.10.1 over local HTTPS: authenticator on, passkey registered and
+  used for login (CDP virtual authenticator), emergency access page, admin page.
+- Not supported: YubiKey OTP and Duo 2FA (listed by the web vault, setup fails); org attachment quota (#7450).

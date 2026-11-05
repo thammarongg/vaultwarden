@@ -1180,3 +1180,40 @@ pub async fn post_sstamp(
 
     Ok(Json(json!({})))
 }
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyIdData {
+    user_key_id: String,
+}
+
+/// POST /accounts/key-management/user-key-id: record the id of the user key once
+/// (vaultwarden #7693). A second call is refused like upstream.
+#[worker::send]
+pub async fn post_user_key_id(
+    claims: Claims,
+    State(env): State<Arc<Env>>,
+    Json(data): Json<KeyIdData>,
+) -> Result<Json<Value>, AppError> {
+    let db = db::get_db(&env)?;
+    let changed = d1_query!(
+        &db,
+        "UPDATE users SET key_id = ?1 WHERE uuid = ?2 AND key_id IS NULL",
+        data.user_key_id,
+        claims.sub
+    )
+    .map_err(|_| AppError::Database)?
+    .run()
+    .await?
+    .meta()
+    .map_err(|_| AppError::Database)?
+    .and_then(|m| m.changes)
+    .unwrap_or(0);
+    if changed == 0 {
+        return Err(AppError::api_json(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!({ "error": "Unexpected data" }),
+        ));
+    }
+    Ok(Json(json!({})))
+}
