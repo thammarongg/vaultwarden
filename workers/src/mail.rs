@@ -56,14 +56,17 @@ pub(crate) fn render_html(subject: &str, text: &str) -> String {
     let mut blocks = String::new();
     let mut fallback_link = None;
     for para in body.split("\n\n").map(str::trim).filter(|p| !p.is_empty()) {
-        if let Some((label, url)) = para
-            .rsplit_once(": ")
-            .filter(|(_, u)| (u.starts_with("https://") || u.starts_with("http://")) && !u.contains(char::is_whitespace))
-        {
+        if let Some((label, url)) = para.rsplit_once(": ").filter(|(_, u)| {
+            (u.starts_with("https://") || u.starts_with("http://"))
+                && !u.contains(char::is_whitespace)
+        }) {
             let label = label.trim_start_matches("Click here to ").trim();
             let label = if label.is_empty() { "Open" } else { label };
             let mut chars = label.chars();
-            let label: String = chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default();
+            let label: String = chars
+                .next()
+                .map(|c| c.to_uppercase().chain(chars).collect())
+                .unwrap_or_default();
             blocks.push_str(&format!(
                 r#"<table role="presentation" cellspacing="0" cellpadding="0" style="margin:24px 0"><tr><td style="border-radius:8px;background:{BRAND_COLOR}"><a href="{u}" style="display:inline-block;padding:12px 28px;font-size:16px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px">{l}</a></td></tr></table>"#,
                 u = escape_html(url),
@@ -470,14 +473,19 @@ mod tests {
         assert!(h.contains(r#"href="https://vault.example/#/accept?a=1&amp;b=2""#));
         assert!(h.contains(">Join</a>"));
         assert!(h.contains("&lt;Family&gt;") && !h.contains("<Family>"));
-        let c = render_html("Code", "Your two-step verification code is: 482913\n\nUse it.");
+        let c = render_html(
+            "Code",
+            "Your two-step verification code is: 482913\n\nUse it.",
+        );
         assert!(c.contains(">482913</div>"));
     }
 
     /// `MAIL_PREVIEW_DIR=/tmp/x cargo test --lib mail::tests::write_previews` writes sample HTML.
     #[test]
     fn write_previews() {
-        let Ok(dir) = std::env::var("MAIL_PREVIEW_DIR") else { return };
+        let Ok(dir) = std::env::var("MAIL_PREVIEW_DIR") else {
+            return;
+        };
         let samples = [
             ("org-invite", "Join Family", format!("You have been invited to join the Family organization.\n\nClick here to join: https://vault.asdevwishes.com/#/accept-organization/?email=mom%40example.com&organizationName=Family&token=eyJhbGciOi...\n\nIf you do not wish to join this organization, you can safely ignore this email.{FOOTER}")),
             ("2fa-code", "AsDevWishes Vault Login Verification Code", format!("Your two-step verification code is: 482913\n\nUse this code to complete logging in with AsDevWishes Vault.{FOOTER}")),

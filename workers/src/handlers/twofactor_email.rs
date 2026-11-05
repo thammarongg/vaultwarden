@@ -62,7 +62,12 @@ fn uvt_key(env: &Env) -> Result<jwt_compact::alg::Hs256Key, AppError> {
     ))
 }
 
-fn uvt_encode<T: Serialize>(env: &Env, user_id: &str, enabled: bool, claims: T) -> Result<String, AppError> {
+fn uvt_encode<T: Serialize>(
+    env: &Env,
+    user_id: &str,
+    enabled: bool,
+    claims: T,
+) -> Result<String, AppError> {
     use jwt_compact::AlgorithmExt;
     let jwt = jwt_compact::Claims::new(TwoFactorClaims {
         iss: UVT_ISSUER.to_string(),
@@ -80,7 +85,12 @@ fn uvt_encode<T: Serialize>(env: &Env, user_id: &str, enabled: bool, claims: T) 
         .map_err(|_| AppError::Crypto("Failed to create verification token".to_string()))
 }
 
-fn uvt_decode<T: DeserializeOwned>(env: &Env, token: &str, user_id: &str, enabled: bool) -> Result<T, AppError> {
+fn uvt_decode<T: DeserializeOwned>(
+    env: &Env,
+    token: &str,
+    user_id: &str,
+    enabled: bool,
+) -> Result<T, AppError> {
     use jwt_compact::AlgorithmExt;
     let invalid = |why: &str| AppError::BadRequest(format!("Invalid verification token: {why}"));
     let untrusted = jwt_compact::UntrustedToken::new(token).map_err(|_| invalid("malformed"))?;
@@ -106,7 +116,12 @@ fn uvt_decode<T: DeserializeOwned>(env: &Env, token: &str, user_id: &str, enable
     Ok(claims.claims)
 }
 
-pub fn authenticator_token(env: &Env, user_id: &str, key: &str, enabled: bool) -> Result<String, AppError> {
+pub fn authenticator_token(
+    env: &Env,
+    user_id: &str,
+    key: &str,
+    enabled: bool,
+) -> Result<String, AppError> {
     uvt_encode(
         env,
         user_id,
@@ -117,7 +132,13 @@ pub fn authenticator_token(env: &Env, user_id: &str, key: &str, enabled: bool) -
     )
 }
 
-pub fn validate_authenticator(env: &Env, token: &str, user_id: &str, key: &str, enabled: bool) -> Result<(), AppError> {
+pub fn validate_authenticator(
+    env: &Env,
+    token: &str,
+    user_id: &str,
+    key: &str,
+    enabled: bool,
+) -> Result<(), AppError> {
     let claims: AuthenticatorClaims = uvt_decode(env, token, user_id, enabled)?;
     if !claims.authenticator_key.eq_ignore_ascii_case(key) {
         return Err(AppError::BadRequest(
@@ -133,11 +154,29 @@ struct WebauthnClaims {
     webauthn_keys: Vec<i32>,
 }
 
-pub fn webauthn_token(env: &Env, user_id: &str, keys: Vec<i32>, enabled: bool) -> Result<String, AppError> {
-    uvt_encode(env, user_id, enabled, WebauthnClaims { webauthn_keys: keys })
+pub fn webauthn_token(
+    env: &Env,
+    user_id: &str,
+    keys: Vec<i32>,
+    enabled: bool,
+) -> Result<String, AppError> {
+    uvt_encode(
+        env,
+        user_id,
+        enabled,
+        WebauthnClaims {
+            webauthn_keys: keys,
+        },
+    )
 }
 
-pub fn validate_webauthn(env: &Env, token: &str, user_id: &str, keys: &[i32], enabled: bool) -> Result<(), AppError> {
+pub fn validate_webauthn(
+    env: &Env,
+    token: &str,
+    user_id: &str,
+    keys: &[i32],
+    enabled: bool,
+) -> Result<(), AppError> {
     let claims: WebauthnClaims = uvt_decode(env, token, user_id, enabled)?;
     if claims.webauthn_keys != keys {
         return Err(AppError::BadRequest(
@@ -147,11 +186,22 @@ pub fn validate_webauthn(env: &Env, token: &str, user_id: &str, keys: &[i32], en
     Ok(())
 }
 
-fn email_token(env: &Env, user_id: &str, email: Option<String>, enabled: bool) -> Result<String, AppError> {
+fn email_token(
+    env: &Env,
+    user_id: &str,
+    email: Option<String>,
+    enabled: bool,
+) -> Result<String, AppError> {
     uvt_encode(env, user_id, enabled, EmailClaims { email })
 }
 
-fn validate_email(env: &Env, token: &str, user_id: &str, email: &str, enabled: bool) -> Result<(), AppError> {
+fn validate_email(
+    env: &Env,
+    token: &str,
+    user_id: &str,
+    email: &str,
+    enabled: bool,
+) -> Result<(), AppError> {
     let claims: EmailClaims = uvt_decode(env, token, user_id, enabled)?;
     if enabled && claims.email.as_deref() != Some(email) {
         return Err(AppError::BadRequest(
@@ -206,7 +256,8 @@ impl EmailTokenData {
     }
 
     fn from_json(s: &str) -> Result<Self, AppError> {
-        serde_json::from_str(s).map_err(|_| AppError::BadRequest("Could not decode EmailTokenData".to_string()))
+        serde_json::from_str(s)
+            .map_err(|_| AppError::BadRequest("Could not decode EmailTokenData".to_string()))
     }
 
     fn to_json(&self) -> String {
@@ -221,12 +272,20 @@ pub fn obscure_email(email: &str) -> String {
     let shown = if n <= 3 {
         "*".repeat(n)
     } else {
-        format!("{}{}", name.chars().take(2).collect::<String>(), "*".repeat(n - 2))
+        format!(
+            "{}{}",
+            name.chars().take(2).collect::<String>(),
+            "*".repeat(n - 2)
+        )
     };
     format!("{shown}@{domain}")
 }
 
-pub(crate) async fn find_tf(db: &db::Db, user_id: &str, atype: TwoFactorType) -> Result<Option<TwoFactor>, AppError> {
+pub(crate) async fn find_tf(
+    db: &db::Db,
+    user_id: &str,
+    atype: TwoFactorType,
+) -> Result<Option<TwoFactor>, AppError> {
     Ok(db
         .prepare("SELECT * FROM twofactor WHERE user_uuid = ?1 AND atype = ?2")
         .bind(&[user_id.into(), (atype as i32).into()])?
@@ -235,10 +294,15 @@ pub(crate) async fn find_tf(db: &db::Db, user_id: &str, atype: TwoFactorType) ->
 }
 
 async fn save_data(db: &db::Db, uuid: &str, data: &str) -> Result<(), AppError> {
-    d1_query!(db, "UPDATE twofactor SET data = ?1 WHERE uuid = ?2", data, uuid)
-        .map_err(|_| AppError::Database)?
-        .run()
-        .await?;
+    d1_query!(
+        db,
+        "UPDATE twofactor SET data = ?1 WHERE uuid = ?2",
+        data,
+        uuid
+    )
+    .map_err(|_| AppError::Database)?
+    .run()
+    .await?;
     Ok(())
 }
 
@@ -317,7 +381,13 @@ pub async fn get_email(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&env)?;
     let user = load_user(&db, &user_id).await?;
-    verify_token_or_password(&user, None, data.master_password_hash.as_deref(), |_| Ok(())).await?;
+    verify_token_or_password(
+        &user,
+        None,
+        data.master_password_hash.as_deref(),
+        |_| Ok(()),
+    )
+    .await?;
     let (enabled, email) = match find_tf(&db, &user_id, TwoFactorType::Email).await? {
         Some(tf) => (true, Some(EmailTokenData::from_json(&tf.data)?.email)),
         None => (false, None),
@@ -420,7 +490,8 @@ pub async fn enable_email(
     let Some(issued) = pending.last_token.clone() else {
         return Err(AppError::BadRequest("No token available".to_string()));
     };
-    if !ct_eq(&issued, data.token.trim()) || !pending.email.eq_ignore_ascii_case(data.email.trim()) {
+    if !ct_eq(&issued, data.token.trim()) || !pending.email.eq_ignore_ascii_case(data.email.trim())
+    {
         return Err(AppError::BadRequest("Token is invalid".to_string()));
     }
     pending.last_token = None;
@@ -444,7 +515,9 @@ pub async fn enable_email(
     ])
     .await?;
     crate::handlers::twofactor::generate_recovery_code_for_user(&db, &user_id).await?;
-    Ok(Json(json!({ "email": pending.email, "enabled": true, "object": "twoFactorEmail" })))
+    Ok(Json(
+        json!({ "email": pending.email, "enabled": true, "object": "twoFactorEmail" }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -517,11 +590,18 @@ pub async fn send_email_login(
         .ok_or_else(wrong)?;
     let db = db::get_db(&env)?;
     let user = User::find_by_email(&db, &email).await?.ok_or_else(wrong)?;
-    if let Some(hash) = data.master_password_hash.as_deref().filter(|h| !h.is_empty()) {
+    if let Some(hash) = data
+        .master_password_hash
+        .as_deref()
+        .filter(|h| !h.is_empty())
+    {
         if !user.verify_master_password(hash).await?.is_valid() {
             return Err(wrong());
         }
-    } else if let (Some(id), Some(code)) = (data.auth_request_id.as_deref(), data.auth_request_access_code.as_deref()) {
+    } else if let (Some(id), Some(code)) = (
+        data.auth_request_id.as_deref(),
+        data.auth_request_access_code.as_deref(),
+    ) {
         // Login with device: the request must be approved, unused, fresh and match its code.
         #[derive(Deserialize)]
         struct Req {
@@ -540,8 +620,14 @@ pub async fn send_email_login(
             .first(None)
             .await?
             .ok_or_else(|| AppError::BadRequest("AuthRequest doesn't exist".to_string()))?;
-        if req.approved != Some(1) || req.authentication_date.is_some() || req.fresh == 0 || !ct_eq(&req.access_code, code) {
-            return Err(AppError::BadRequest("AuthRequest doesn't exist".to_string()));
+        if req.approved != Some(1)
+            || req.authentication_date.is_some()
+            || req.fresh == 0
+            || !ct_eq(&req.access_code, code)
+        {
+            return Err(AppError::BadRequest(
+                "AuthRequest doesn't exist".to_string(),
+            ));
         }
     } else {
         return Err(AppError::BadRequest(

@@ -51,10 +51,13 @@ simple = { limit = 15, period = 60 }
 # Frontend files (bw_web_builds) are expected under ./public/web-vault before deployment
 [assets]
 directory = "./public/web-vault"
+binding = "ASSETS"
 not_found_handling = "404-page"
 html_handling = "auto-trailing-slash"
 # Only invoke Worker for API and Identity routes, serve static files directly for other routes
-run_worker_first = ["/api/*", "/identity/*", "/notifications/*", "/admin", "/admin/*"]
+# The *-connector.html pages go through the Worker so they are served with 200 instead of the
+# assets' 307 to the extensionless path (breaks WebAuthn 2FA in the desktop app).
+run_worker_first = ["/api/*", "/identity/*", "/notifications/*", "/admin", "/admin/*", "/*-connector.html"]
 
 [vars]
 # Show the "Create account" button; the server still only accepts emails matching the ALLOWED_EMAILS secret.

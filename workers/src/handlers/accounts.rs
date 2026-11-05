@@ -689,10 +689,17 @@ pub async fn post_password(
                     "KDF settings must be equal for authentication and unlock".to_string(),
                 ));
             }
-            if !auth.salt.eq_ignore_ascii_case(&user.email) || !unlock.salt.eq_ignore_ascii_case(&user.email) {
-                return Err(AppError::BadRequest("Invalid master password salt".to_string()));
+            if !auth.salt.eq_ignore_ascii_case(&user.email)
+                || !unlock.salt.eq_ignore_ascii_case(&user.email)
+            {
+                return Err(AppError::BadRequest(
+                    "Invalid master password salt".to_string(),
+                ));
             }
-            (auth.master_password_authentication_hash, unlock.master_key_wrapped_user_key)
+            (
+                auth.master_password_authentication_hash,
+                unlock.master_key_wrapped_user_key,
+            )
         }
         (_, _, Some(hash), Some(key)) => (hash, key),
         _ => return Err(AppError::BadRequest("Invalid request!".to_string())),

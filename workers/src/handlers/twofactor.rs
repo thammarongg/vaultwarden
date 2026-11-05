@@ -476,7 +476,10 @@ async fn clear_recovery_if_no_twofactor(db: &crate::db::Db, user_id: &str) -> Re
 
 /// vaultwarden `check_2fa_state`: after a provider is removed no remembered device may keep
 /// skipping the ones left, and once none is left the recovery code goes and the 2FA policy applies.
-pub(crate) async fn after_provider_removed(db: &crate::db::Db, user_id: &str) -> Result<(), AppError> {
+pub(crate) async fn after_provider_removed(
+    db: &crate::db::Db,
+    user_id: &str,
+) -> Result<(), AppError> {
     d1_query!(
         db,
         "UPDATE devices SET twofactor_remember = NULL WHERE user_uuid = ?1",

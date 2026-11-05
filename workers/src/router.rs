@@ -6,9 +6,9 @@ use std::sync::Arc;
 use worker::Env;
 
 use crate::handlers::{
-    accounts, admin, attachments, auth_requests, ciphers, config, devices, domains, emergency_access,
-    folders, identity, import, meta, org_admin, org_groups, org_policies, organizations, sends,
-    sync, twofactor, twofactor_email, webauth, webauthn,
+    accounts, admin, attachments, auth_requests, ciphers, config, connectors, devices, domains,
+    emergency_access, folders, identity, import, meta, org_admin, org_groups, org_policies,
+    organizations, sends, sync, twofactor, twofactor_email, webauth, webauthn,
 };
 
 pub fn api_router(env: Env) -> Router {
@@ -607,6 +607,26 @@ pub fn api_router(env: Env) -> Router {
         // WebAuthn (stub - prevents 404 errors, passkeys not supported)
         .route("/api/webauthn", get(webauth::get_webauthn_credentials))
         // Two-factor authentication
+        // 2FA/SSO connector pages: 200 without redirect (desktop app iframe)
+        .route(
+            "/duo-redirect-connector.html",
+            get(connectors::connector_page),
+        )
+        .route(
+            "/proxy-cookie-redirect-connector.html",
+            get(connectors::connector_page),
+        )
+        .route("/redirect-connector.html", get(connectors::connector_page))
+        .route("/sso-connector.html", get(connectors::connector_page))
+        .route("/webauthn-connector.html", get(connectors::connector_page))
+        .route(
+            "/webauthn-fallback-connector.html",
+            get(connectors::connector_page),
+        )
+        .route(
+            "/webauthn-mobile-connector.html",
+            get(connectors::connector_page),
+        )
         // Admin page
         .route("/admin", get(admin::admin_page).post(admin::login))
         .route("/admin/", get(admin::admin_page))
@@ -672,10 +692,7 @@ pub fn api_router(env: Env) -> Router {
             "/api/two-factor/send-email-login",
             post(twofactor_email::send_email_login),
         )
-        .route(
-            "/api/two-factor/get-webauthn",
-            post(webauthn::get_webauthn),
-        )
+        .route("/api/two-factor/get-webauthn", post(webauthn::get_webauthn))
         .route(
             "/api/two-factor/get-webauthn-challenge",
             post(webauthn::get_webauthn_challenge),

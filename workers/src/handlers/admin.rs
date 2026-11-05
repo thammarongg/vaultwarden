@@ -83,7 +83,10 @@ fn has_session(env: &Env, headers: &HeaderMap) -> bool {
     let Ok(untrusted) = jwt_compact::UntrustedToken::new(&raw) else {
         return false;
     };
-    let Ok(token) = jwt_compact::alg::Hs256.validator::<AdminClaims>(&key).validate(&untrusted) else {
+    let Ok(token) = jwt_compact::alg::Hs256
+        .validator::<AdminClaims>(&key)
+        .validate(&untrusted)
+    else {
         return false;
     };
     token
@@ -116,8 +119,14 @@ fn check_origin(env: &Env, headers: &HeaderMap) -> Result<(), AppError> {
         });
     // `wrangler dev` rewrites Origin/Host to the configured route, so also accept an origin whose
     // authority is this request's Host.
-    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or_default();
-    let same_host = |o: &str| o.split_once("://").is_some_and(|(_, a)| !host.is_empty() && a == host);
+    let host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    let same_host = |o: &str| {
+        o.split_once("://")
+            .is_some_and(|(_, a)| !host.is_empty() && a == host)
+    };
     match origin {
         Some(o) if o == base || same_host(&o) => Ok(()),
         other => {
@@ -301,19 +310,49 @@ pub async fn admin_page(
     if let Err(r) = guard(&env, &headers) {
         return r;
     }
-    let secret_set = |n: &str| if env.secret(n).is_ok() { "set" } else { "not set" };
+    let secret_set = |n: &str| {
+        if env.secret(n).is_ok() {
+            "set"
+        } else {
+            "not set"
+        }
+    };
     let allowed = env
         .secret("ALLOWED_EMAILS")
         .map(|s| s.to_string())
         .unwrap_or_default();
     let rows = [
         ("Domain (BASE_URL)", esc(&crate::mail::domain(&env))),
-        ("User registration disabled", esc(&var(&env, "DISABLE_USER_REGISTRATION"))),
+        (
+            "User registration disabled",
+            esc(&var(&env, "DISABLE_USER_REGISTRATION")),
+        ),
         ("Allowed signup emails (ALLOWED_EMAILS)", esc(&allowed)),
-        ("Mail (Resend)", if crate::mail::mail_enabled(&env) { "enabled".into() } else { "disabled".into() }),
+        (
+            "Mail (Resend)",
+            if crate::mail::mail_enabled(&env) {
+                "enabled".into()
+            } else {
+                "disabled".into()
+            },
+        ),
         ("Mail sender (MAIL_FROM)", esc(&var(&env, "MAIL_FROM"))),
-        ("Attachments (R2)", if crate::handlers::attachments::attachments_enabled(&env) { "enabled".into() } else { "disabled".into() }),
-        ("JWT_SECRET / JWT_REFRESH_SECRET", format!("{} / {}", secret_set("JWT_SECRET"), secret_set("JWT_REFRESH_SECRET"))),
+        (
+            "Attachments (R2)",
+            if crate::handlers::attachments::attachments_enabled(&env) {
+                "enabled".into()
+            } else {
+                "disabled".into()
+            },
+        ),
+        (
+            "JWT_SECRET / JWT_REFRESH_SECRET",
+            format!(
+                "{} / {}",
+                secret_set("JWT_SECRET"),
+                secret_set("JWT_REFRESH_SECRET")
+            ),
+        ),
         ("RESEND_API_KEY", secret_set("RESEND_API_KEY").to_string()),
     ];
     let dl: String = rows
@@ -505,9 +544,16 @@ async fn user_action(env: &Env, id: &str, what: &str) -> Result<String, AppError
     match what {
         "deauth" => {
             db.batch(vec![
-                d1_query!(&db, "UPDATE users SET security_stamp = ?1, updated_at = ?2 WHERE uuid = ?3", new_stamp, now, id)
+                d1_query!(
+                    &db,
+                    "UPDATE users SET security_stamp = ?1, updated_at = ?2 WHERE uuid = ?3",
+                    new_stamp,
+                    now,
+                    id
+                )
+                .map_err(|_| AppError::Database)?,
+                d1_query!(&db, "DELETE FROM devices WHERE user_uuid = ?1", id)
                     .map_err(|_| AppError::Database)?,
-                d1_query!(&db, "DELETE FROM devices WHERE user_uuid = ?1", id).map_err(|_| AppError::Database)?,
             ])
             .await?;
             crate::notifications::publish_user_logout(env.clone(), id.to_string(), now, None);
@@ -524,19 +570,34 @@ async fn user_action(env: &Env, id: &str, what: &str) -> Result<String, AppError
             Ok(format!("{email} disabled."))
         }
         "enable" => {
-            d1_query!(&db, "UPDATE users SET enabled = 1, updated_at = ?1 WHERE uuid = ?2", now, id)
-                .map_err(|_| AppError::Database)?
-                .run()
-                .await?;
+            d1_query!(
+                &db,
+                "UPDATE users SET enabled = 1, updated_at = ?1 WHERE uuid = ?2",
+                now,
+                id
+            )
+            .map_err(|_| AppError::Database)?
+            .run()
+            .await?;
             Ok(format!("{email} enabled."))
         }
         "remove-2fa" => {
             db.batch(vec![
-                d1_query!(&db, "DELETE FROM twofactor WHERE user_uuid = ?1", id).map_err(|_| AppError::Database)?,
-                d1_query!(&db, "UPDATE users SET totp_recover = NULL, updated_at = ?1 WHERE uuid = ?2", now, id)
+                d1_query!(&db, "DELETE FROM twofactor WHERE user_uuid = ?1", id)
                     .map_err(|_| AppError::Database)?,
-                d1_query!(&db, "UPDATE devices SET twofactor_remember = NULL WHERE user_uuid = ?1", id)
-                    .map_err(|_| AppError::Database)?,
+                d1_query!(
+                    &db,
+                    "UPDATE users SET totp_recover = NULL, updated_at = ?1 WHERE uuid = ?2",
+                    now,
+                    id
+                )
+                .map_err(|_| AppError::Database)?,
+                d1_query!(
+                    &db,
+                    "UPDATE devices SET twofactor_remember = NULL WHERE user_uuid = ?1",
+                    id
+                )
+                .map_err(|_| AppError::Database)?,
             ])
             .await?;
             crate::handlers::org_policies::enforce_2fa_policy_for_user(&db, id).await?;
@@ -553,12 +614,14 @@ async fn user_action(env: &Env, id: &str, what: &str) -> Result<String, AppError
                 .await?;
             if sole_owner.is_some() {
                 return Err(AppError::BadRequest(
-                    "Can't delete the last owner of an organization: delete the organization first".to_string(),
+                    "Can't delete the last owner of an organization: delete the organization first"
+                        .to_string(),
                 ));
             }
             crate::push::unregister_push_devices_by_user(env, id).await;
             if crate::handlers::attachments::attachments_enabled(env) {
-                let keys = crate::handlers::attachments::list_attachment_keys_for_user(&db, id).await?;
+                let keys =
+                    crate::handlers::attachments::list_attachment_keys_for_user(&db, id).await?;
                 crate::handlers::attachments::delete_storage_objects(env, &keys).await?;
             }
             crate::handlers::sends::delete_user_sends(&db, env, id).await?;
@@ -735,7 +798,12 @@ pub async fn organizations_overview(
     }
     .await;
     let Ok(orgs) = orgs else {
-        return page("Organizations", true, Some("Could not load organizations."), "");
+        return page(
+            "Organizations",
+            true,
+            Some("Could not load organizations."),
+            "",
+        );
     };
     let rows: String = orgs
         .iter()
@@ -787,8 +855,10 @@ pub async fn delete_organization(
             crate::handlers::attachments::delete_storage_objects(&env, &keys).await?;
         }
         crate::handlers::organizations::touch_org_members(&db, &id).await?;
-        db.batch(crate::handlers::organizations::delete_org_statements(&db, &id)?)
-            .await?;
+        db.batch(crate::handlers::organizations::delete_org_statements(
+            &db, &id,
+        )?)
+        .await?;
         Ok("Organization deleted.".to_string())
     }
     .await;
@@ -809,9 +879,21 @@ pub async fn diagnostics(State(env): State<Arc<Env>>, headers: HeaderMap) -> Res
         return r;
     }
     let tables = [
-        "users", "ciphers", "folders", "attachments", "sends", "devices", "organizations",
-        "users_organizations", "collections", "groups", "org_policies", "emergency_access",
-        "twofactor", "auth_requests", "invitations",
+        "users",
+        "ciphers",
+        "folders",
+        "attachments",
+        "sends",
+        "devices",
+        "organizations",
+        "users_organizations",
+        "collections",
+        "groups",
+        "org_policies",
+        "emergency_access",
+        "twofactor",
+        "auth_requests",
+        "invitations",
     ];
     let counts: Result<Vec<(String, i64)>, AppError> = async {
         let db = db::get_db(&env)?;
@@ -827,7 +909,12 @@ pub async fn diagnostics(State(env): State<Arc<Env>>, headers: HeaderMap) -> Res
         let row: Value = db.prepare(sql).first(None).await?.unwrap_or_default();
         Ok(tables
             .iter()
-            .map(|t| (t.to_string(), row.get(*t).and_then(Value::as_i64).unwrap_or(0)))
+            .map(|t| {
+                (
+                    t.to_string(),
+                    row.get(*t).and_then(Value::as_i64).unwrap_or(0),
+                )
+            })
             .collect())
     }
     .await;
@@ -850,7 +937,11 @@ pub async fn diagnostics(State(env): State<Arc<Env>>, headers: HeaderMap) -> Res
             r#"<dl><dt>Server</dt><dd>vaultwarden-cf (Cloudflare Workers + D1 + R2), crate {ver}</dd><dt>Server time</dt><dd>{server_time}</dd><dt>Domain</dt><dd>{dom}</dd><dt>Mail</dt><dd>{mail}</dd></dl><h3>Rows</h3><dl>{counts_html}</dl>"#,
             ver = env!("CARGO_PKG_VERSION"),
             dom = esc(&crate::mail::domain(&env)),
-            mail = if crate::mail::mail_enabled(&env) { "enabled (Resend)" } else { "disabled" },
+            mail = if crate::mail::mail_enabled(&env) {
+                "enabled (Resend)"
+            } else {
+                "disabled"
+            },
         ),
     )
 }

@@ -322,7 +322,9 @@ async fn authenticate_password_grant(
         .await
         .map_err(|_| AppError::Database)?;
     if enabled == Some(0) {
-        return Err(AppError::BadRequest("This user has been disabled".to_string()));
+        return Err(AppError::BadRequest(
+            "This user has been disabled".to_string(),
+        ));
     }
 
     // Bitwarden "login with device" flow:
@@ -705,8 +707,14 @@ pub async fn token(
                             .iter()
                             .find(|tf| tf.atype == TwoFactorType::Webauthn as i32)
                             .ok_or_else(|| AppError::TwoFactorRequired(challenge.clone()))?;
-                        crate::handlers::webauthn::validate_login(&env, &db, &user.id, tf, twofactor_code)
-                            .await?;
+                        crate::handlers::webauthn::validate_login(
+                            &env,
+                            &db,
+                            &user.id,
+                            tf,
+                            twofactor_code,
+                        )
+                        .await?;
                         should_issue_remember = payload.two_factor_remember == Some(1);
                     }
                     Some(TwoFactorType::Remember) => {
@@ -894,7 +902,12 @@ fn provider_ids(enabled: &[&TwoFactor]) -> Vec<i32> {
 
 /// The 2FA challenge for the user's enabled providers, with each provider's extra data
 /// (`TwoFactorProviders2`): obscured address for email, a fresh WebAuthn assertion challenge.
-async fn twofactor_challenge(env: &Env, db: &db::Db, user_id: &str, enabled: &[&TwoFactor]) -> Result<Value, AppError> {
+async fn twofactor_challenge(
+    env: &Env,
+    db: &db::Db,
+    user_id: &str,
+    enabled: &[&TwoFactor],
+) -> Result<Value, AppError> {
     let mut result = json_err_twofactor(&provider_ids(enabled));
     for tf in enabled {
         let extra = if tf.atype == TwoFactorType::Email as i32 {

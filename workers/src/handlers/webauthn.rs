@@ -258,8 +258,14 @@ fn parse_credential(v: &Value) -> Option<Cred> {
         alg,
         jwk,
         counter: c.get("counter").and_then(Value::as_u64).unwrap_or(0) as u32,
-        backup_eligible: c.get("backup_eligible").and_then(Value::as_bool).unwrap_or(false),
-        backup_state: c.get("backup_state").and_then(Value::as_bool).unwrap_or(false),
+        backup_eligible: c
+            .get("backup_eligible")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        backup_state: c
+            .get("backup_state")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -346,7 +352,10 @@ async fn verify_signature(cred: &Cred, signature: &[u8], data: &[u8]) -> Result<
             },
         ),
         -257 => (
-            obj(&[("name", "RSASSA-PKCS1-v1_5".into()), ("hash", "SHA-256".into())])?,
+            obj(&[
+                ("name", "RSASSA-PKCS1-v1_5".into()),
+                ("hash", "SHA-256".into()),
+            ])?,
             obj(&[("name", "RSASSA-PKCS1-v1_5".into())])?,
             signature.to_vec(),
         ),
@@ -360,7 +369,13 @@ async fn verify_signature(cred: &Cred, signature: &[u8], data: &[u8]) -> Result<
     let usages = Array::of1(&JsValue::from_str("verify"));
     let key = JsFuture::from(
         subtle
-            .import_key_with_object("jwk", jwk.unchecked_ref::<Object>(), &import_alg, false, &usages)
+            .import_key_with_object(
+                "jwk",
+                jwk.unchecked_ref::<Object>(),
+                &import_alg,
+                false,
+                &usages,
+            )
             .map_err(js_err("importKey"))?,
     )
     .await
@@ -390,7 +405,10 @@ async fn verify_signature(cred: &Cred, signature: &[u8], data: &[u8]) -> Result<
 // Storage helpers
 // ---------------------------------------------------------------------------
 
-async fn registrations(db: &db::Db, user_id: &str) -> Result<(Option<TwoFactor>, Vec<Registration>), AppError> {
+async fn registrations(
+    db: &db::Db,
+    user_id: &str,
+) -> Result<(Option<TwoFactor>, Vec<Registration>), AppError> {
     match find_tf(db, user_id, TwoFactorType::Webauthn).await? {
         Some(tf) => {
             let regs: Vec<Registration> = serde_json::from_str(&tf.data).unwrap_or_default();
@@ -400,7 +418,11 @@ async fn registrations(db: &db::Db, user_id: &str) -> Result<(Option<TwoFactor>,
     }
 }
 
-async fn save_registrations(db: &db::Db, user_id: &str, regs: &[Registration]) -> Result<(), AppError> {
+async fn save_registrations(
+    db: &db::Db,
+    user_id: &str,
+    regs: &[Registration],
+) -> Result<(), AppError> {
     let data = serde_json::to_string(regs).map_err(|_| AppError::Internal)?;
     db.batch(vec![
         d1_query!(
@@ -424,7 +446,12 @@ async fn save_registrations(db: &db::Db, user_id: &str, regs: &[Registration]) -
     Ok(())
 }
 
-async fn put_state(db: &db::Db, user_id: &str, atype: TwoFactorType, state: &Value) -> Result<(), AppError> {
+async fn put_state(
+    db: &db::Db,
+    user_id: &str,
+    atype: TwoFactorType,
+    state: &Value,
+) -> Result<(), AppError> {
     db.batch(vec![
         d1_query!(
             db,
@@ -499,12 +526,20 @@ fn ct_eq_bytes(a: &[u8], b: &[u8]) -> bool {
     constant_time_eq::constant_time_eq(a, b)
 }
 
-fn check_client_data(raw: &[u8], kind: &str, challenge: &str, origin: &str) -> Result<(), AppError> {
+fn check_client_data(
+    raw: &[u8],
+    kind: &str,
+    challenge: &str,
+    origin: &str,
+) -> Result<(), AppError> {
     let cd: Value = serde_json::from_slice(raw).map_err(|_| bad("Invalid client data"))?;
     if cd.get("type").and_then(Value::as_str) != Some(kind) {
         return Err(bad("Invalid client data type"));
     }
-    let got = cd.get("challenge").and_then(Value::as_str).and_then(b64_any);
+    let got = cd
+        .get("challenge")
+        .and_then(Value::as_str)
+        .and_then(b64_any);
     let want = b64_any(challenge);
     if got.is_none() || got != want {
         return Err(bad("Webauthn challenge mismatch"));
@@ -541,7 +576,13 @@ pub async fn get_webauthn(
     relying_party(&env)?;
     let db = db::get_db(&env)?;
     let user = load_user(&db, &user_id).await?;
-    verify_token_or_password(&user, None, data.master_password_hash.as_deref(), |_| Ok(())).await?;
+    verify_token_or_password(
+        &user,
+        None,
+        data.master_password_hash.as_deref(),
+        |_| Ok(()),
+    )
+    .await?;
     let (tf, regs) = registrations(&db, &user_id).await?;
     let enabled = tf.is_some_and(|t| t.enabled);
     Ok(Json(json!({
@@ -568,16 +609,34 @@ pub async fn get_webauthn_challenge(
     let user = load_user(&db, &user_id).await?;
     let (tf, regs) = registrations(&db, &user_id).await?;
     let enabled = tf.is_some_and(|t| t.enabled);
-    validate_webauthn(&env, &data.user_verification_token, &user_id, &keys_of(&regs), enabled)?;
+    validate_webauthn(
+        &env,
+        &data.user_verification_token,
+        &user_id,
+        &keys_of(&regs),
+        enabled,
+    )?;
     let challenge = b64url(&random_bytes(32)?);
-    put_state(&db, &user_id, TwoFactorType::WebauthnRegisterChallenge, &json!({ "challenge": challenge })).await?;
-    let user_handle = Uuid::parse_str(&user_id).map(|u| b64url(u.as_bytes())).unwrap_or_else(|_| b64url(user_id.as_bytes()));
+    put_state(
+        &db,
+        &user_id,
+        TwoFactorType::WebauthnRegisterChallenge,
+        &json!({ "challenge": challenge }),
+    )
+    .await?;
+    let user_handle = Uuid::parse_str(&user_id)
+        .map(|u| b64url(u.as_bytes()))
+        .unwrap_or_else(|_| b64url(user_id.as_bytes()));
     let exclude: Vec<Value> = regs
         .iter()
         .filter_map(Registration::cred)
         .map(|c| json!({ "type": "public-key", "id": c.cred_id }))
         .collect();
-    let display = user.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| user.email.clone());
+    let display = user
+        .name
+        .clone()
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| user.email.clone());
     Ok(Json(json!({
         "options": {
             "rp": { "id": rp_id, "name": crate::mail::domain(&env) },
@@ -622,14 +681,29 @@ pub async fn activate_webauthn(
     let db = db::get_db(&env)?;
     let (_, mut regs) = registrations(&db, &user_id).await?;
     let keys = keys_of(&regs);
-    validate_webauthn(&env, &data.user_verification_token, &user_id, &keys, !keys.is_empty())?;
+    validate_webauthn(
+        &env,
+        &data.user_verification_token,
+        &user_id,
+        &keys,
+        !keys.is_empty(),
+    )?;
     let state = take_state(&db, &user_id, TwoFactorType::WebauthnRegisterChallenge).await?;
-    let challenge = state.get("challenge").and_then(Value::as_str).unwrap_or_default();
+    let challenge = state
+        .get("challenge")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
 
-    let resp = data.device_response.get("response").ok_or_else(|| bad("Invalid device response"))?;
-    let client_data = field(resp, &["clientDataJson", "clientDataJSON", "ClientDataJson"])
-        .and_then(b64_any)
-        .ok_or_else(|| bad("Invalid client data"))?;
+    let resp = data
+        .device_response
+        .get("response")
+        .ok_or_else(|| bad("Invalid device response"))?;
+    let client_data = field(
+        resp,
+        &["clientDataJson", "clientDataJSON", "ClientDataJson"],
+    )
+    .and_then(b64_any)
+    .ok_or_else(|| bad("Invalid client data"))?;
     check_client_data(&client_data, "webauthn.create", challenge, &origin)?;
     let att_obj = field(resp, &["attestationObject", "AttestationObject"])
         .and_then(b64_any)
@@ -648,10 +722,15 @@ pub async fn activate_webauthn(
         .rest
         .get(18..18 + id_len)
         .ok_or_else(|| bad("Invalid credential id"))?;
-    let (cose, _) = cbor_decode(&ad.rest[18 + id_len..]).ok_or_else(|| bad("Invalid credential public key"))?;
+    let (cose, _) =
+        cbor_decode(&ad.rest[18 + id_len..]).ok_or_else(|| bad("Invalid credential public key"))?;
     let (alg, jwk) = cose_to_jwk(&cose)?;
     let cred_id = b64url(cred_id);
-    if regs.iter().filter_map(Registration::cred).any(|c| c.cred_id == cred_id) {
+    if regs
+        .iter()
+        .filter_map(Registration::cred)
+        .any(|c| c.cred_id == cred_id)
+    {
         return Err(bad("This key is already registered"));
     }
     let cred = Cred {
@@ -682,13 +761,24 @@ pub struct DeleteData {
 }
 
 /// DELETE /api/two-factor/webauthn (one key) and /api/two-factor/webauthn/all.
-async fn delete_impl(env: &Env, user_id: &str, data: DeleteData, all: bool) -> Result<Json<Value>, AppError> {
+async fn delete_impl(
+    env: &Env,
+    user_id: &str,
+    data: DeleteData,
+    all: bool,
+) -> Result<Json<Value>, AppError> {
     let db = db::get_db(env)?;
     let (tf, mut regs) = registrations(&db, user_id).await?;
     if tf.is_none() {
         return Err(bad("Webauthn data not found!"));
     }
-    validate_webauthn(env, &data.user_verification_token, user_id, &keys_of(&regs), true)?;
+    validate_webauthn(
+        env,
+        &data.user_verification_token,
+        user_id,
+        &keys_of(&regs),
+        true,
+    )?;
     let before = regs.len();
     if all {
         regs.clear();
@@ -739,7 +829,12 @@ pub async fn delete_all_webauthn(
 // ---------------------------------------------------------------------------
 
 /// Start a login: store a challenge and return the assertion options for `TwoFactorProviders2`.
-pub async fn start_login(env: &Env, db: &db::Db, user_id: &str, tf: &TwoFactor) -> Result<Value, AppError> {
+pub async fn start_login(
+    env: &Env,
+    db: &db::Db,
+    user_id: &str,
+    tf: &TwoFactor,
+) -> Result<Value, AppError> {
     let (rp_id, _) = relying_party(env)?;
     let regs: Vec<Registration> = serde_json::from_str(&tf.data).unwrap_or_default();
     let allow: Vec<Value> = regs
@@ -752,7 +847,13 @@ pub async fn start_login(env: &Env, db: &db::Db, user_id: &str, tf: &TwoFactor) 
     }
     let challenge = b64url(&random_bytes(32)?);
     let app_id = format!("{}/app-id.json", crate::mail::domain(env));
-    put_state(db, user_id, TwoFactorType::WebauthnLoginChallenge, &json!({ "challenge": challenge, "appid": app_id })).await?;
+    put_state(
+        db,
+        user_id,
+        TwoFactorType::WebauthnLoginChallenge,
+        &json!({ "challenge": challenge, "appid": app_id }),
+    )
+    .await?;
     Ok(json!({
         "challenge": challenge,
         "timeout": TIMEOUT_MS,
@@ -764,19 +865,37 @@ pub async fn start_login(env: &Env, db: &db::Db, user_id: &str, tf: &TwoFactor) 
 }
 
 /// Check the assertion sent as the 2FA token (vaultwarden `validate_webauthn_login`).
-pub async fn validate_login(env: &Env, db: &db::Db, user_id: &str, tf: &TwoFactor, token: &str) -> Result<(), AppError> {
+pub async fn validate_login(
+    env: &Env,
+    db: &db::Db,
+    user_id: &str,
+    tf: &TwoFactor,
+    token: &str,
+) -> Result<(), AppError> {
     let (rp_id, origin) = relying_party(env)?;
     let state = take_state(db, user_id, TwoFactorType::WebauthnLoginChallenge).await?;
-    let challenge = state.get("challenge").and_then(Value::as_str).unwrap_or_default();
-    let app_id = state.get("appid").and_then(Value::as_str).unwrap_or_default();
+    let challenge = state
+        .get("challenge")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let app_id = state
+        .get("appid")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let rsp: Value = serde_json::from_str(token).map_err(|_| bad("Invalid webauthn response"))?;
     let raw_id = field(&rsp, &["rawId", "id", "RawId", "Id"])
         .and_then(b64_any)
         .ok_or_else(|| bad("Invalid webauthn response"))?;
-    let resp = rsp.get("response").or_else(|| rsp.get("Response")).ok_or_else(|| bad("Invalid webauthn response"))?;
-    let client_data = field(resp, &["clientDataJson", "clientDataJSON", "ClientDataJson"])
-        .and_then(b64_any)
-        .ok_or_else(|| bad("Invalid client data"))?;
+    let resp = rsp
+        .get("response")
+        .or_else(|| rsp.get("Response"))
+        .ok_or_else(|| bad("Invalid webauthn response"))?;
+    let client_data = field(
+        resp,
+        &["clientDataJson", "clientDataJSON", "ClientDataJson"],
+    )
+    .and_then(b64_any)
+    .ok_or_else(|| bad("Invalid client data"))?;
     let auth = field(resp, &["authenticatorData", "AuthenticatorData"])
         .and_then(b64_any)
         .ok_or_else(|| bad("Invalid authenticator data"))?;
@@ -784,7 +903,10 @@ pub async fn validate_login(env: &Env, db: &db::Db, user_id: &str, tf: &TwoFacto
         .and_then(b64_any)
         .ok_or_else(|| bad("Invalid signature"))?;
     check_client_data(&client_data, "webauthn.get", challenge, &origin)?;
-    let ad = parse_auth_data(&auth, &[sha256(rp_id.as_bytes()), sha256(app_id.as_bytes())])?;
+    let ad = parse_auth_data(
+        &auth,
+        &[sha256(rp_id.as_bytes()), sha256(app_id.as_bytes())],
+    )?;
 
     let mut regs: Vec<Registration> = serde_json::from_str(&tf.data).unwrap_or_default();
     let raw_id = b64url(&raw_id);
@@ -792,7 +914,9 @@ pub async fn validate_login(env: &Env, db: &db::Db, user_id: &str, tf: &TwoFacto
         .iter()
         .position(|r| r.cred().is_some_and(|c| ct_eq(&c.cred_id, &raw_id)))
         .ok_or_else(|| bad("Credential not present"))?;
-    let mut cred = regs[idx].cred().ok_or_else(|| bad("Credential not present"))?;
+    let mut cred = regs[idx]
+        .cred()
+        .ok_or_else(|| bad("Credential not present"))?;
     let mut signed = auth.clone();
     signed.extend_from_slice(&sha256(&client_data));
     if !verify_signature(&cred, &sig, &signed).await? {
@@ -817,12 +941,16 @@ mod tests {
     fn cbor_reads_nested_maps() {
         // {"fmt": "none", "authData": h'0102', "attStmt": {}}
         let buf = [
-            0xa3, 0x63, b'f', b'm', b't', 0x64, b'n', b'o', b'n', b'e', 0x68, b'a', b'u', b't', b'h',
-            b'D', b'a', b't', b'a', 0x42, 1, 2, 0x67, b'a', b't', b't', b'S', b't', b'm', b't', 0xa0,
+            0xa3, 0x63, b'f', b'm', b't', 0x64, b'n', b'o', b'n', b'e', 0x68, b'a', b'u', b't',
+            b'h', b'D', b'a', b't', b'a', 0x42, 1, 2, 0x67, b'a', b't', b't', b'S', b't', b'm',
+            b't', 0xa0,
         ];
         let (v, used) = cbor_decode(&buf).unwrap();
         assert_eq!(used, buf.len());
-        assert_eq!(v.get(&Cbor::Text("authData".into())).and_then(Cbor::bytes), Some(&[1u8, 2][..]));
+        assert_eq!(
+            v.get(&Cbor::Text("authData".into())).and_then(Cbor::bytes),
+            Some(&[1u8, 2][..])
+        );
         assert_eq!(cbor_decode(&[0x38, 0x18]).unwrap().0, Cbor::Int(-25));
         assert!(cbor_decode(&[0x5f]).is_none());
     }

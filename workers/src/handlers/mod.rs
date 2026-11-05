@@ -4,6 +4,7 @@ pub mod attachments;
 pub mod auth_requests;
 pub mod ciphers;
 pub mod config;
+pub mod connectors;
 pub mod devices;
 pub mod domains;
 pub mod emergency_access;
