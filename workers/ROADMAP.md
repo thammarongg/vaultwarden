@@ -67,18 +67,16 @@ is the reference implementation for porting features.
 
 ## Backlog from the daily security/update watch
 
-- Port vaultwarden #7563 (2FA userVerificationToken) before moving the web vault past
-  done (2FA userVerificationToken API); web vault now v2026.10.1.
-- Port #7450 (attachment v2 quota), #7777 (don't leak internal errors to clients; D1
-  error text currently reaches clients on 500s). #7837 done (`db::delete_user_rows`).
-- Phase 3 gaps: org attachments not counted against a quota; no "removed from org" email
-  when a policy revokes a member; events not recorded (endpoints return empty lists).
+- Done: #7563 (2FA userVerificationToken), #7777 (generic 5xx), #7837, #7450 (quota counts
+  reserved v2 uploads; org items use `ORG_ATTACHMENT_LIMIT_KB`), #7634, #7693.
+- Open: no "removed from org" email when a policy revokes a member; org events not recorded
+  (endpoints return empty lists); Duo and YubiKey OTP 2FA (hidden in the web vault).
 
 ## Open decisions
 
 - Upstream: how to keep pulling fixes from warden-worker now that the schema diverged.
 
-## Phase 4 (branch `backlog-phase4`, tested locally 2026-11-05)
+## Phase 4 (deployed 2026-11-05: `19567fe0`, branded HTML mail `a1f4f084`)
 
 - #7777 generic client errors; #7634 password payload; #7693 user key id.
 - Import from vaultwarden: `scripts/import_vaultwarden.py`, `tests/import_check.sh` (docker 1.37.5).
@@ -86,4 +84,12 @@ is the reference implementation for porting features.
   admin page `/admin` (ADMIN_TOKEN secret).
 - Checked in the real web vault 2026.10.1 over local HTTPS: authenticator on, passkey registered and
   used for login (CDP virtual authenticator), emergency access page, admin page.
-- Not supported: YubiKey OTP and Duo 2FA (listed by the web vault, setup fails); org attachment quota (#7450).
+- Not supported: YubiKey OTP and Duo 2FA, hidden via `public/css/vaultwarden.css`.
+
+## Maintenance (2026-11-05)
+
+- Attachment quota per user and per organization (#7450), `tests/smoke_quota.py`; prod sets
+  2 GB each (R2 free tier is 10 GB).
+- `public/css/vaultwarden.css` had hidden Email 2FA, Passkey 2FA and the Emergency access menu
+  (inherited from warden-worker); now only Duo/YubiKey are hidden.
+- wrangler pinned in `.wrangler-version`.

@@ -5,7 +5,7 @@
 # the same vault. Local only: never touches remote resources.
 #
 # Env: PORT (Worker, default 8787), VW_PORT (default 8798), VW_IMAGE (default vaultwarden/server:1.37.5),
-#      WRANGLER_VERSION (default latest).
+#      WRANGLER_VERSION (default: .wrangler-version).
 set -euo pipefail
 
 cd "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -13,7 +13,7 @@ cd "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 PORT="${PORT:-8787}"
 VW_PORT="${VW_PORT:-8798}"
 VW_IMAGE="${VW_IMAGE:-vaultwarden/server:1.37.5}"
-WRANGLER="npx -y wrangler@${WRANGLER_VERSION:-latest}"
+WRANGLER="npx -y wrangler@${WRANGLER_VERSION:-$(cat .wrangler-version)}"
 WORK="$(mktemp -d -t vw-import.XXXXXX)"
 STATE="${WORK}/wrangler-state"
 NAME="vw-import-check-$$"

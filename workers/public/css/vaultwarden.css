@@ -39,21 +39,13 @@ bit-dialog div.tw-col-span-4:has(input[formcontrolname*="access"], input[formcon
 app-security > app-two-factor-setup > form,
 app-user-layout app-danger-zone button:nth-child(1),
 
-/* Two-factor providers (hide unsupported ones) */
-/* Email */
-.providers-2fa-1,
-
+/* Two-factor providers this server does not implement (Email, Authenticator and
+   Passkey 2FA are supported; Email needs RESEND_API_KEY, which prod has). */
 /* Duo */
 .providers-2fa-2,
 
-/* YubiKey */
+/* YubiKey OTP */
 .providers-2fa-3,
-
-/* WebAuthn */
-.providers-2fa-7,
-
-/* Emergency access (not supported) */
-bit-nav-item[route="settings/emergency-access"],
 
 /* Passkey settings (not supported) */
 app-user-layout app-password-settings app-webauthn-login-settings {

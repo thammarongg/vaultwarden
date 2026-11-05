@@ -42,7 +42,7 @@ if [ -f rust-toolchain.toml ]; then
   export RUSTUP_TOOLCHAIN
 fi
 
-WRANGLER_VERSION="${WRANGLER_VERSION:-4.82.1}"
+WRANGLER_VERSION="${WRANGLER_VERSION:-$(cat "$(dirname "$0")/../.wrangler-version")}"
 D1_NAME="${D1_NAME:-vault1}"
 SEED_GLOBAL_DOMAINS="${SEED_GLOBAL_DOMAINS:-true}"
 SKIP_D1="${SKIP_D1:-0}"

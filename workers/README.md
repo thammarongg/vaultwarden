@@ -242,8 +242,11 @@ Configure environment variables in `wrangler.toml` under `[vars]`, or set them v
   - Max size for individual attachment files. 
   - Example: `104857600` for 100MB.
 * **`ATTACHMENT_TOTAL_LIMIT_KB`** (Optional): 
-  - Max total attachment storage per user in KB. 
+  - Max total attachment storage per user in KB, counting the user's personal items
+    (uploaded plus reserved v2 uploads, like vaultwarden #7450). `0` disables attachments.
   - Example: `1048576` for 1GB.
+* **`ORG_ATTACHMENT_LIMIT_KB`** (Optional):
+  - Same for items owned by an organization (vaultwarden `ORG_ATTACHMENT_LIMIT`).
 * **`ATTACHMENT_TTL_SECS`** (Optional, Default: `300`, Minimum: `60`): 
   - TTL for attachment upload/download URLs.
 * **`SEND_TEXT_MAX_BYTES`** (Optional, Default: `1887436` ≈ 1.8 MiB):
@@ -254,6 +257,32 @@ Configure environment variables in `wrangler.toml` under `[vars]`, or set them v
   - Max total Send file storage per user in KB.
 * **`SEND_TTL_SECS`** (Optional, Default: `300`):
   - TTL for Send file upload/download URLs.
+
+### Mail (Resend)
+
+* **`RESEND_API_KEY`** (secret) enables mail; **`MAIL_FROM`** sets the sender. Without it the
+  server behaves like vaultwarden without SMTP (org invites auto-accept, no email 2FA).
+* Each email has a plain-text part (vaultwarden's wording) and a branded HTML part built from it
+  (`mail::render_html`). Preview the HTML locally:
+  `MAIL_PREVIEW_DIR=/tmp/mail cargo test --lib mail::tests::write_previews`.
+
+### Admin page
+
+* **`ADMIN_TOKEN`** (secret) enables `/admin` (users, organizations, diagnostics). Generate it
+  with `openssl rand -base64 48`; it is compared in constant time (no argon2: Workers Free CPU).
+  Sessions last 20 minutes. Delete the secret to turn the page off.
+
+### Web vault tweaks
+
+* `public/css/vaultwarden.css` (copied into the web vault by `scripts/cf-build.sh`) hides UI this
+  server does not implement: Duo and YubiKey OTP 2FA, passkey *login*, device verification,
+  billing. Email, Authenticator and Passkey 2FA plus Emergency access stay visible.
+
+### Wrangler version
+
+* `.wrangler-version` pins wrangler for `tests/run_local.sh`, `tests/import_check.sh`,
+  `tests/smoke_emergency.py` and `scripts/cf-deploy.sh`. Override with `WRANGLER_VERSION`.
+  Deploy with the same version: `npx -y wrangler@$(cat .wrangler-version) deploy`.
 
 ### Scheduled Tasks (Cron)
 

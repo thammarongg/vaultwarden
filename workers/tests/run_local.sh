@@ -4,13 +4,13 @@
 # tests/smoke.py, smoke_orgs.py, smoke_emergency.py and smoke_2fa.py, then restarts it with mail enabled (mock API) for
 # tests/smoke_mail.py. Local state only: never touches remote resources.
 #
-# Env: PORT (default 8787), WRANGLER_VERSION (default latest), SKIP_BUILD=1 to reuse build/.
+# Env: PORT (default 8787), WRANGLER_VERSION (default: .wrangler-version), SKIP_BUILD=1 to reuse build/.
 set -euo pipefail
 
 cd "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
 PORT="${PORT:-8787}"
-WRANGLER="npx -y wrangler@${WRANGLER_VERSION:-latest}"
+WRANGLER="npx -y wrangler@${WRANGLER_VERSION:-$(cat .wrangler-version)}"
 LOG="$(mktemp -t wrangler-dev.XXXXXX)"
 BASE_URL="http://127.0.0.1:${PORT}"
 
@@ -107,9 +107,12 @@ SERVER_PID=""
 MAIL_LOG="$(mktemp -t wrangler-dev-mail.XXXXXX)"
 MAIL_MOCK_PORT="${MAIL_MOCK_PORT:-8799}"
 if [ "${STATUS}" -eq 0 ]; then
+  # Small attachment quotas for smoke_quota.py (smoke_mail.py uploads no files).
   start_server "${MAIL_LOG}" --var "RESEND_API_KEY:local-test-key" \
-    --var "MAIL_API_URL:http://127.0.0.1:${MAIL_MOCK_PORT}"
+    --var "MAIL_API_URL:http://127.0.0.1:${MAIL_MOCK_PORT}" \
+    --var "ATTACHMENT_TOTAL_LIMIT_KB:16" --var "ORG_ATTACHMENT_LIMIT_KB:8"
   SMOKE_BASE_URL="${BASE_URL}" MAIL_MOCK_PORT="${MAIL_MOCK_PORT}" python3 -I tests/smoke_mail.py || STATUS=$?
+  [ "${STATUS}" -eq 0 ] && { SMOKE_BASE_URL="${BASE_URL}" python3 -I tests/smoke_quota.py || STATUS=$?; }
   if [ "${STATUS}" -ne 0 ]; then
     echo "== Last server log lines (mail)" >&2
     tail -n 60 "${MAIL_LOG}" >&2

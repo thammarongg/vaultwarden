@@ -10,9 +10,8 @@ use jwt_compact::AlgorithmExt;
 use jwt_compact::{alg::Hs256Key, Claims as JwtClaims, Header};
 use log;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use uuid::Uuid;
-use worker::{wasm_bindgen::JsValue, Env};
+use worker::Env;
 
 use crate::d1_query;
 
@@ -186,8 +185,8 @@ pub async fn create_attachment_v2(
         &db,
         &env,
         &claims.sub,
+        cipher.organization_id.as_deref(),
         declared_size,
-        None, /* exclude_attachment */
     )
     .await?;
 
@@ -353,7 +352,14 @@ pub async fn upload_attachment_legacy(
     }
 
     // Validate capacity limits
-    enforce_limits(&db, &env, &claims.sub, actual_size, None).await?;
+    enforce_limits(
+        &db,
+        &env,
+        &claims.sub,
+        cipher.organization_id.as_deref(),
+        actual_size,
+    )
+    .await?;
 
     let attachment_id = Uuid::new_v4().to_string();
     let now = db::now_string();
@@ -905,12 +911,16 @@ fn download_ttl_secs(env: &Env) -> Result<i64, AppError> {
     }
 }
 
+/// Storage quota (vaultwarden `attachment_size_limit`, #7450): personal items count against
+/// the owner's `ATTACHMENT_TOTAL_LIMIT_KB`, organization items against the organization's
+/// `ORG_ATTACHMENT_LIMIT_KB`. Pending (reserved, not yet uploaded) files count too, so a v2
+/// reservation can't overshoot. A limit of 0 disables attachments for that owner type.
 async fn enforce_limits(
     db: &crate::db::Db,
     env: &Env,
     user_id: &str,
+    organization_id: Option<&str>,
     new_size: i64,
-    exclude_attachment: Option<&str>,
 ) -> Result<(), AppError> {
     if new_size < 0 {
         return Err(AppError::BadRequest(
@@ -935,22 +945,27 @@ async fn enforce_limits(
         }
     }
 
-    // Check total storage limit
-    let limit_bytes = total_limit_bytes(env)?;
-    if let Some(limit_bytes) = limit_bytes {
-        let used = user_attachment_usage(db, user_id, exclude_attachment).await?;
-        let limit = limit_bytes as i64;
-        let new_total = used
-            .checked_add(new_size)
-            .ok_or_else(|| AppError::BadRequest("Attachment size overflow".to_string()))?;
-
-        if new_total > limit {
-            return Err(AppError::BadRequest(
-                "Attachment storage limit reached".to_string(),
-            ));
-        }
+    let (var, column, owner) = match organization_id {
+        Some(org) => ("ORG_ATTACHMENT_LIMIT_KB", "organization_uuid", org),
+        None => ("ATTACHMENT_TOTAL_LIMIT_KB", "user_uuid", user_id),
+    };
+    let Some(limit_bytes) = limit_kb_bytes(env, var)? else {
+        return Ok(());
+    };
+    if limit_bytes == 0 {
+        return Err(AppError::BadRequest("Attachments are disabled".to_string()));
     }
-
+    let used = attachment_usage(db, column, owner).await?;
+    let new_total = used
+        .checked_add(new_size)
+        .ok_or_else(|| AppError::BadRequest("Attachment size overflow".to_string()))?;
+    if new_total > limit_bytes as i64 {
+        return Err(AppError::BadRequest(if used >= limit_bytes as i64 {
+            "Attachment storage limit reached! Delete some attachments to free up space".to_string()
+        } else {
+            "Attachment storage limit exceeded with this file".to_string()
+        }));
+    }
     Ok(())
 }
 
@@ -967,79 +982,41 @@ fn attachment_max_bytes(env: &Env) -> Result<Option<u64>, AppError> {
     }
 }
 
-fn total_limit_bytes(env: &Env) -> Result<Option<u64>, AppError> {
-    match env.var("ATTACHMENT_TOTAL_LIMIT_KB") {
-        Ok(v) => {
-            let raw = v.to_string();
-            let kb = raw.parse::<u64>().map_err(|err| {
-                log::error!("Invalid ATTACHMENT_TOTAL_LIMIT_KB '{}': {}", raw, err);
-                AppError::Internal
-            })?;
-
-            let bytes = kb.checked_mul(1024).ok_or_else(|| {
-                log::error!(
-                    "ATTACHMENT_TOTAL_LIMIT_KB '{}' overflowed when converting to bytes",
-                    raw
-                );
-                AppError::Internal
-            })?;
-
-            Ok(Some(bytes))
-        }
-        Err(_) => Ok(None),
+fn limit_kb_bytes(env: &Env, name: &str) -> Result<Option<u64>, AppError> {
+    let Ok(v) = env.var(name) else {
+        return Ok(None);
+    };
+    let raw = v.to_string();
+    if raw.trim().is_empty() {
+        return Ok(None);
     }
+    let kb = raw.trim().parse::<u64>().map_err(|err| {
+        log::error!("Invalid {name} '{raw}': {err}");
+        AppError::Internal
+    })?;
+    kb.checked_mul(1024).map(Some).ok_or_else(|| {
+        log::error!("{name} '{raw}' overflowed when converting to bytes");
+        AppError::Internal
+    })
 }
 
-async fn user_attachment_usage(
-    db: &crate::db::Db,
-    user_id: &str,
-    exclude_attachment: Option<&str>,
-) -> Result<i64, AppError> {
-    let (query_str, bindings): (String, Vec<JsValue>) = if let Some(id) = exclude_attachment {
-        (
-            "SELECT COALESCE(SUM(file_size), 0) as total FROM (
-                SELECT a.file_size AS file_size
-                FROM attachments a
-                JOIN ciphers c ON c.uuid = a.cipher_uuid
-                WHERE c.user_uuid = ?1 AND a.id != ?2
-                UNION ALL
-                SELECT p.file_size AS file_size
-                FROM attachments_pending p
-                JOIN ciphers c2 ON c2.uuid = p.cipher_id
-                WHERE c2.user_uuid = ?1 AND p.id != ?2
-            ) AS files"
-                .to_string(),
-            vec![JsValue::from_str(user_id), JsValue::from_str(id)],
-        )
-    } else {
-        (
-            "SELECT COALESCE(SUM(file_size), 0) as total FROM (
-                SELECT a.file_size AS file_size
-                FROM attachments a
-                JOIN ciphers c ON c.uuid = a.cipher_uuid
-                WHERE c.user_uuid = ?1
-                UNION ALL
-                SELECT p.file_size AS file_size
-                FROM attachments_pending p
-                JOIN ciphers c2 ON c2.uuid = p.cipher_id
-                WHERE c2.user_uuid = ?1
-            ) AS files"
-                .to_string(),
-            vec![JsValue::from_str(user_id)],
-        )
-    };
-
-    let row: Option<Value> = db
-        .prepare(query_str)
-        .bind(&bindings)?
-        .first(None)
+/// Bytes stored plus reserved for ciphers owned by `owner` (`column` = user_uuid or
+/// organization_uuid).
+async fn attachment_usage(db: &crate::db::Db, column: &str, owner: &str) -> Result<i64, AppError> {
+    let sql = format!(
+        "SELECT COALESCE(SUM(file_size), 0) AS total FROM (
+            SELECT a.file_size AS file_size FROM attachments a
+              JOIN ciphers c ON c.uuid = a.cipher_uuid WHERE c.{column} = ?1
+            UNION ALL
+            SELECT p.file_size AS file_size FROM attachments_pending p
+              JOIN ciphers c2 ON c2.uuid = p.cipher_id WHERE c2.{column} = ?1
+        )"
+    );
+    let total: Option<f64> = db
+        .prepare(sql)
+        .bind(&[owner.into()])?
+        .first(Some("total"))
         .await
         .map_err(|_| AppError::Database)?;
-
-    let total = row
-        .and_then(|v| v.get("total").cloned())
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-
-    Ok(total)
+    Ok(total.unwrap_or(0.0) as i64)
 }

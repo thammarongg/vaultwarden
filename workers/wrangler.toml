@@ -69,6 +69,10 @@ BASE_URL = "https://vault.asdevwishes.com"
 # Mail is enabled only when the RESEND_API_KEY secret is also set.
 MAIL_FROM = "AsDevWishes Vault <no-reply@vault.asdevwishes.com>"
 
+# Attachment storage quota in KB (vaultwarden #7450). R2 free tier is 10 GB in total.
+ATTACHMENT_TOTAL_LIMIT_KB = "2097152"  # 2 GB per user (personal items)
+ORG_ATTACHMENT_LIMIT_KB = "2097152"    # 2 GB per organization
+
 # Server-side password hashing PBKDF2 iterations (stored per-user).
 # Defaults to 600000, and will be clamped to a minimum of 600000 even if set lower.
 # Existing users whose password iterations are less than this value will be upgraded on login.

@@ -34,7 +34,8 @@ WORKERS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def local_sql(sql):
-    cmd = ["npx", "-y", "wrangler", "d1", "execute", "vaultwarden-cf", "--local", "--command", sql]
+    version = os.environ.get("WRANGLER_VERSION") or open(os.path.join(WORKERS, ".wrangler-version")).read().strip()
+    cmd = ["npx", "-y", f"wrangler@{version}", "d1", "execute", "vaultwarden-cf", "--local", "--command", sql]
     if os.environ.get("SMOKE_PERSIST_TO"):
         cmd += ["--persist-to", os.environ["SMOKE_PERSIST_TO"]]
     subprocess.run(cmd, cwd=WORKERS, check=True, capture_output=True, timeout=120)
