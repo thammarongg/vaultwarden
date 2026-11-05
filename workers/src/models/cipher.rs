@@ -199,7 +199,8 @@ pub struct Cipher {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CipherDBModel {
     pub id: String,
-    pub user_id: String,
+    /// NULL for organization ciphers.
+    pub user_id: Option<String>,
     pub organization_id: Option<String>,
     pub r#type: i32,
     pub data: String,
@@ -209,13 +210,55 @@ pub struct CipherDBModel {
     pub archived_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Effective access flags for the requesting user (see `org_access`).
+    #[serde(default)]
+    pub read_only: i32,
+    #[serde(default)]
+    pub hide_passwords: i32,
+    #[serde(default)]
+    pub manage: i32,
+    /// JSON array of the cipher's collections visible to the requesting user.
+    #[serde(default)]
+    pub collection_ids: Option<String>,
+}
+
+impl CipherDBModel {
+    /// SQL returning one `CipherDBModel` row for cipher `?1` as seen by user `?2`
+    /// (personal or organization cipher); no row if the user can't see it.
+    pub fn select_for_user_sql() -> String {
+        format!(
+            "{}SELECT w.id, w.user_id, w.organization_id, w.type, w.data,
+                    EXISTS (SELECT 1 FROM favorites f WHERE f.cipher_uuid = w.id AND f.user_uuid = ?2) AS favorite,
+                    (SELECT fc.folder_uuid FROM folders_ciphers fc JOIN folders fo ON fo.uuid = fc.folder_uuid
+                       WHERE fc.cipher_uuid = w.id AND fo.user_uuid = ?2 LIMIT 1) AS folder_id,
+                    w.deleted_at,
+                    (SELECT ar.archived_at FROM archives ar WHERE ar.cipher_uuid = w.id AND ar.user_uuid = ?2) AS archived_at,
+                    w.created_at, w.updated_at, a.read_only, a.hide_passwords, a.manage,
+                    (SELECT json_group_array(cc.collection_uuid) FROM ciphers_collections cc
+                       WHERE cc.cipher_uuid = w.id AND cc.collection_uuid IN (SELECT collection_uuid FROM ucol)) AS collection_ids
+             FROM wk_ciphers w JOIN access a ON a.cipher_uuid = w.id
+             WHERE w.id = ?1",
+            crate::models::org_access::with_access("?2")
+        )
+    }
 }
 
 impl From<CipherDBModel> for Cipher {
     fn from(val: CipherDBModel) -> Self {
+        let is_org = val.organization_id.is_some();
+        let collection_ids = if val.organization_id.is_some() {
+            Some(
+                val.collection_ids
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+                    .unwrap_or_default(),
+            )
+        } else {
+            None
+        };
         Cipher {
             id: val.id,
-            user_id: Some(val.user_id),
+            user_id: val.user_id,
             organization_id: val.organization_id,
             r#type: val.r#type,
             data: serde_json::from_str(&val.data).unwrap_or_default(),
@@ -226,10 +269,10 @@ impl From<CipherDBModel> for Cipher {
             created_at: val.created_at,
             updated_at: val.updated_at,
             object: default_object(),
-            organization_use_totp: false,
-            edit: true,
-            view_password: true,
-            collection_ids: None,
+            organization_use_totp: is_org,
+            edit: val.read_only == 0,
+            view_password: val.hide_passwords == 0,
+            collection_ids,
             attachments: None,
         }
     }
@@ -572,16 +615,22 @@ pub fn update_cipher_stmt(
     db: &crate::db::Db,
     id: &str,
     user_id: &str,
-    organization_id: Option<&str>,
+    _organization_id: Option<&str>,
     atype: i32,
     cols: &CipherColumns,
     updated_at: &str,
 ) -> Result<worker::D1PreparedStatement, worker::Error> {
+    // Ownership (user_uuid / organization_uuid) never changes here; sharing a personal cipher
+    // into an organization goes through `share_cipher_stmts`. The update only applies when the
+    // user bound to ?11 may write the cipher (personal owner or non-read-only org access).
     crate::d1_query!(
         db,
-        "UPDATE ciphers SET organization_uuid = ?1, atype = ?2, name = ?3, notes = ?4, fields = ?5, data = ?6, password_history = ?7, reprompt = ?8, \"key\" = ?9, updated_at = ?10
-         WHERE uuid = ?11 AND user_uuid = ?12",
-        organization_id,
+        &format!(
+            "{}UPDATE ciphers SET atype = ?1, name = ?2, notes = ?3, fields = ?4, data = ?5, password_history = ?6, reprompt = ?7, \"key\" = ?8, updated_at = ?9
+             WHERE uuid = ?10 AND {}",
+            crate::models::org_access::with_access("?11"),
+            crate::models::org_access::WRITABLE
+        ),
         atype,
         cols.name,
         cols.notes,
@@ -594,6 +643,50 @@ pub fn update_cipher_stmt(
         id,
         user_id,
     )
+}
+
+/// Share a personal cipher into an organization: vaultwarden `share_cipher_by_uuid`.
+/// Replaces the content (re-encrypted with the org key by the client), moves ownership to the
+/// org and assigns the collections. Caller must check the user may write to every collection.
+#[allow(clippy::too_many_arguments)]
+pub fn share_cipher_stmts(
+    db: &crate::db::Db,
+    id: &str,
+    user_id: &str,
+    organization_id: &str,
+    atype: i32,
+    cols: &CipherColumns,
+    collection_ids: &[String],
+    updated_at: &str,
+) -> Result<Vec<worker::D1PreparedStatement>, worker::Error> {
+    let mut out = vec![crate::d1_query!(
+        db,
+        "UPDATE ciphers SET user_uuid = NULL, organization_uuid = ?1, atype = ?2, name = ?3, notes = ?4, fields = ?5, data = ?6, password_history = ?7, reprompt = ?8, \"key\" = ?9, updated_at = ?10
+         WHERE uuid = ?11 AND user_uuid = ?12 AND organization_uuid IS NULL",
+        organization_id,
+        atype,
+        cols.name,
+        cols.notes,
+        cols.fields,
+        cols.data,
+        cols.password_history,
+        cols.reprompt,
+        cols.key,
+        updated_at,
+        id,
+        user_id,
+    )?];
+    for col in collection_ids {
+        out.push(crate::d1_query!(
+            db,
+            "INSERT OR IGNORE INTO ciphers_collections (cipher_uuid, collection_uuid)
+             SELECT ?1, uuid FROM collections WHERE uuid = ?2 AND org_uuid = ?3",
+            id,
+            col,
+            organization_id
+        )?);
+    }
+    Ok(out)
 }
 
 /// Put a cipher in `folder_id` (or no folder) for `user_id`: vaultwarden `move_to_folder`.
@@ -679,10 +772,16 @@ pub fn create_cipher_stmts(
     updated_at: &str,
 ) -> Result<Vec<worker::D1PreparedStatement>, worker::Error> {
     let cols = CipherColumns::from_blob(atype, blob);
+    // Organization ciphers have no owning user (vaultwarden: user_uuid NULL).
+    let owner = if organization_id.is_some() {
+        None
+    } else {
+        Some(user_id)
+    };
     let mut out = vec![insert_cipher_stmt(
         db,
         id,
-        Some(user_id),
+        owner,
         organization_id,
         atype,
         &cols,

@@ -214,6 +214,15 @@ pub async fn register(
         ));
     }
 
+    // Emails invited to an organization may register even outside ALLOWED_EMAILS
+    // (vaultwarden: invitations bypass SIGNUPS_ALLOWED).
+    let placeholder = {
+        let db = db::get_db(&env)?;
+        crate::handlers::organizations::invited_placeholder(&db, &payload.email.to_lowercase())
+            .await?
+    };
+    let invited = placeholder.as_ref().is_some_and(|(_, invited)| *invited);
+    let invited_user_id = placeholder.map(|(id, _)| id);
     let allowed_emails = env
         .secret("ALLOWED_EMAILS")
         .map_err(|_| AppError::Internal)?;
@@ -221,9 +230,10 @@ pub async fn register(
         .as_ref()
         .as_string()
         .ok_or_else(|| AppError::Internal)?;
-    if !allowed_emails
-        .split(',')
-        .any(|pattern| glob_match(pattern.trim(), &payload.email))
+    if !invited
+        && !allowed_emails
+            .split(',')
+            .any(|pattern| glob_match(pattern.trim(), &payload.email))
     {
         return Err(AppError::Unauthorized("Not allowed to signup".to_string()));
     }
@@ -259,7 +269,9 @@ pub async fn register(
     };
 
     let user = User {
-        id: Uuid::new_v4().to_string(),
+        id: invited_user_id
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string()),
         name: payload.name,
         avatar_color: None,
         email: payload.email.to_lowercase(),
@@ -283,38 +295,51 @@ pub async fn register(
         updated_at: now,
     };
 
+    // An invited placeholder row is replaced in place (same uuid keeps its memberships).
+    let insert_sql = if invited_user_id.is_some() {
+        "UPDATE users SET name = COALESCE(?2, ''), email = ?3, password_hash = unhex(?4), password_hint = ?5, salt = unhex(?6), password_iterations = ?7, akey = ?8, private_key = ?9, public_key = ?10, client_kdf_type = ?11, client_kdf_iter = ?12, client_kdf_memory = ?13, client_kdf_parallelism = ?14, security_stamp = ?15, equivalent_domains = ?16, excluded_globals = ?17, totp_recover = ?18, created_at = ?19, updated_at = ?20
+         WHERE uuid = ?1 AND length(password_hash) = 0"
+    } else {
+        "INSERT INTO users (uuid, name, email, password_hash, password_hint, salt, password_iterations, akey, private_key, public_key, client_kdf_type, client_kdf_iter, client_kdf_memory, client_kdf_parallelism, security_stamp, equivalent_domains, excluded_globals, totp_recover, created_at, updated_at)
+         VALUES (?1, COALESCE(?2, ''), ?3, unhex(?4), ?5, unhex(?6), ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)"
+    };
     d1_query!(
         &db,
-        "INSERT INTO users (uuid, name, email, password_hash, password_hint, salt, password_iterations, akey, private_key, public_key, client_kdf_type, client_kdf_iter, client_kdf_memory, client_kdf_parallelism, security_stamp, equivalent_domains, excluded_globals, totp_recover, created_at, updated_at)
-         VALUES (?1, COALESCE(?2, ''), ?3, unhex(?4), ?5, unhex(?6), ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
-         user.id,
-         user.name,
-         user.email,
-         user.master_password_hash,
-         user.master_password_hint,
-         user.password_salt,
-         user.password_iterations,
-         user.key,
-         user.private_key,
-         user.public_key,
-         user.kdf_type,
-         user.kdf_iterations,
-         user.kdf_memory,
-         user.kdf_parallelism,
-         user.security_stamp,
-         user.equivalent_domains,
-         user.excluded_globals,
-         user.totp_recover,
-         user.created_at,
-         user.updated_at
-    ).map_err(|_|{
-        AppError::Database
-    })?
+        insert_sql,
+        user.id,
+        user.name,
+        user.email,
+        user.master_password_hash,
+        user.master_password_hint,
+        user.password_salt,
+        user.password_iterations,
+        user.key,
+        user.private_key,
+        user.public_key,
+        user.kdf_type,
+        user.kdf_iterations,
+        user.kdf_memory,
+        user.kdf_parallelism,
+        user.security_stamp,
+        user.equivalent_domains,
+        user.excluded_globals,
+        user.totp_recover,
+        user.created_at,
+        user.updated_at
+    )
+    .map_err(|_| AppError::Database)?
     .run()
     .await
-    .map_err(|_|{
-        AppError::Database
-    })?;
+    .map_err(|_| AppError::Database)?;
+
+    if invited_user_id.is_some() {
+        db.batch(crate::handlers::organizations::accept_invitations_stmts(
+            &db,
+            &user.id,
+            &user.email,
+        )?)
+        .await?;
+    }
 
     Ok(Json(json!({})))
 }
@@ -425,7 +450,9 @@ pub async fn get_profile(
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
     let two_factor_enabled = two_factor_enabled(&db, &user_id).await?;
-    let profile = Profile::from_user(user, two_factor_enabled)?;
+    let mut profile = Profile::from_user(user, two_factor_enabled)?;
+    profile.organizations =
+        crate::handlers::organizations::profile_organizations(&db, &user_id).await?;
 
     Ok(Json(profile))
 }
@@ -472,7 +499,9 @@ pub async fn post_profile(
     .map_err(|_| AppError::Database)?;
 
     let two_factor_enabled = two_factor_enabled(&db, user_id).await?;
-    let profile = Profile::from_user(user, two_factor_enabled)?;
+    let mut profile = Profile::from_user(user, two_factor_enabled)?;
+    profile.organizations =
+        crate::handlers::organizations::profile_organizations(&db, user_id).await?;
 
     notifications::publish_user_update(
         (*env).clone(),
@@ -539,7 +568,9 @@ pub async fn put_avatar(
     .map_err(|_| AppError::Database)?;
 
     let two_factor_enabled = two_factor_enabled(&db, user_id).await?;
-    let profile = Profile::from_user(user, two_factor_enabled)?;
+    let mut profile = Profile::from_user(user, two_factor_enabled)?;
+    profile.organizations =
+        crate::handlers::organizations::profile_organizations(&db, user_id).await?;
 
     notifications::publish_user_update(
         (*env).clone(),
@@ -580,6 +611,21 @@ pub async fn delete_account(
 
     if !verification.is_valid() {
         return Err(AppError::Unauthorized("Invalid password".to_string()));
+    }
+
+    // vaultwarden `User::delete`: the last confirmed owner of an organization can't leave it.
+    let sole_owner: Option<Value> = db
+        .prepare(
+            "SELECT 1 AS x FROM users_organizations m WHERE m.user_uuid = ?1 AND m.status = 2 AND m.atype = 0
+               AND (SELECT COUNT(*) FROM users_organizations o WHERE o.org_uuid = m.org_uuid AND o.status = 2 AND o.atype = 0) <= 1",
+        )
+        .bind(&[user_id.into()])?
+        .first(None)
+        .await?;
+    if sole_owner.is_some() {
+        return Err(AppError::BadRequest(
+            "Can't delete last owner of an organization".to_string(),
+        ));
     }
 
     push::unregister_push_devices_by_user(&env, user_id).await;

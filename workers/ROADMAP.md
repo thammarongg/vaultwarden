@@ -26,9 +26,32 @@ is the reference implementation for porting features.
 2. **Import from vaultwarden** — script that reads a vaultwarden SQLite file
    (`db.sqlite3`) and writes D1 SQL. Needs a column-by-column map between
    `../migrations/sqlite` (final schema) and `sql/schema.sql`.
-3. **Organizations / Collections / Sharing** — port from
-   `../src/api/core/organizations.rs`, `../src/db/models/{organization,collection,group}.rs`.
-   Largest phase: new D1 tables, membership/ACL checks in sync and cipher handlers.
+3. **Organizations / Collections / Sharing** (team use, full vaultwarden parity) — in progress.
+   Reference: `../src/api/core/organizations.rs` (65 routes), `../src/api/core/ciphers.rs`
+   (share/collections), `../src/db/models/{organization,collection,group,org_policy,cipher}.rs`.
+   Vertical slices, each with smoke tests + a real web-vault check before merging:
+   Status: 3.1 done; 3.2 done except invite emails / invite-token accept (needs mailer); 3.3-3.5 todo.
+   - 3.1 Owner-only org: create/get/update/delete org, keys/public-key, plans/billing stubs;
+     collections CRUD; org ciphers (create with collections, share personal -> org, edit,
+     collections assignment, delete, restore); `/api/ciphers/organization-details`; sync with
+     `profile.organizations`, `collections`, per-user cipher access (owner / access_all /
+     users_collections / groups) and per-user favorite/folder/archive (replaces the owner-only
+     `wk_ciphers` assumption).
+   - 3.2 Members: invite (+ email), reinvite, accept (invite token), confirm (bulk), edit role
+     and collections, remove, revoke/restore, leave, mini-details, public-keys; invited emails
+     may register even when not in ALLOWED_EMAILS (`invitations` table).
+   - 3.3 Groups: CRUD, members, collection access; group-derived cipher access.
+   - 3.4 Custom roles (manage_users/groups/policies/... flags), policies list/get/put and
+     enforcement (2FA required, single org, personal ownership, send options, master password,
+     reset password), org export, import-organization, bulk-collections, collections bulk-access.
+   - 3.5 Account recovery (admin reset password), org API key, events (minimal).
+   Notes: access rules are SQL CTEs in `src/models/org_access.rs` (one query per request, no N+1);
+   org cipher changes bump `updated_at` and send a SyncCiphers push to every other member who can
+   see the cipher. Org attachments don't count against any per-user storage quota yet.
+   Email: provider-agnostic mailer; first provider Resend (HTTP API, secret `RESEND_API_KEY`,
+   domain asdevwishes.com verified at Resend). Workers plan stays Free (Cloudflare Email Sending
+   to arbitrary recipients needs Paid). Without a configured mailer the server follows
+   vaultwarden's no-SMTP behavior (existing users auto-accepted, invitations table for new ones).
 4. **Emergency access, Admin page, more 2FA** — `../src/api/core/emergency_access.rs`,
    `../src/api/admin.rs`, `../src/api/core/two_factor/*`. Email 2FA and invites need
    an email sender (Cloudflare Email Service `send_email` binding); WebAuthn needs a

@@ -137,7 +137,8 @@ pub async fn import_data(
         let cipher = Cipher {
             id: Uuid::new_v4().to_string(),
             user_id: Some(claims.sub.clone()),
-            organization_id: import_cipher.organization_id,
+            // Personal import: never create organization ciphers here (import-organization does).
+            organization_id: None,
             r#type: import_cipher.r#type,
             data: data_value,
             favorite: import_cipher.favorite.unwrap_or(false),

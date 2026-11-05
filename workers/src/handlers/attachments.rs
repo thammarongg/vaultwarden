@@ -166,7 +166,7 @@ pub async fn create_attachment_v2(
     }
     let db = db::get_db(&env)?;
 
-    let cipher = ensure_cipher_for_user(&db, &cipher_id, &claims.sub).await?;
+    let cipher = ensure_writable_cipher_for_user(&db, &cipher_id, &claims.sub).await?;
 
     let AttachmentCreateRequest {
         key,
@@ -269,7 +269,7 @@ pub async fn upload_attachment_v2_data(
     }
     let db = db::get_db(&env)?;
 
-    ensure_cipher_for_user(&db, &cipher_id, &claims.sub).await?;
+    ensure_writable_cipher_for_user(&db, &cipher_id, &claims.sub).await?;
 
     let mut pending = fetch_pending_attachment(&db, &attachment_id).await?;
     if pending.cipher_id != cipher_id {
@@ -338,7 +338,7 @@ pub async fn upload_attachment_legacy(
     }
     let db = db::get_db(&env)?;
 
-    let cipher = ensure_cipher_for_user(&db, &cipher_id, &claims.sub).await?;
+    let cipher = ensure_writable_cipher_for_user(&db, &cipher_id, &claims.sub).await?;
 
     let (file_bytes, key, file_name) = read_multipart(&mut multipart).await?;
     let key = key.ok_or_else(|| AppError::BadRequest("No attachment key provided".to_string()))?;
@@ -450,7 +450,7 @@ pub async fn delete_attachment(
     }
     let db = db::get_db(&env)?;
 
-    let cipher = ensure_cipher_for_user(&db, &cipher_id, &claims.sub).await?;
+    let cipher = ensure_writable_cipher_for_user(&db, &cipher_id, &claims.sub).await?;
     let attachment = fetch_attachment(&db, &attachment_id).await?;
 
     if attachment.cipher_id != cipher.id {
@@ -481,7 +481,7 @@ pub async fn delete_attachment(
     );
 
     // Reload cipher to return fresh updated_at and attachments state
-    let mut cipher_response: Cipher = ensure_cipher_for_user(&db, &cipher_id, &claims.sub)
+    let mut cipher_response: Cipher = ensure_writable_cipher_for_user(&db, &cipher_id, &claims.sub)
         .await?
         .into();
     hydrate_cipher_attachments(&db, &env, &mut cipher_response).await?;
@@ -580,11 +580,14 @@ pub(crate) async fn list_attachment_keys_for_cipher_ids_json(
     user_id: Option<&str>,
 ) -> Result<Vec<String>, AppError> {
     let mut sql = "SELECT a.cipher_uuid AS cipher_id, a.id FROM attachments a JOIN ciphers c ON a.cipher_uuid = c.uuid WHERE c.uuid IN (SELECT value FROM json_each(?1, ?2))".to_string();
+    if user_id.is_some() {
+        sql = format!("{}{sql}", crate::models::org_access::with_access("?3"));
+    }
     let mut params: Vec<worker::wasm_bindgen::JsValue> =
         vec![json_body.to_owned().into(), ids_path.to_owned().into()];
 
     if let Some(uid) = user_id {
-        sql.push_str(" AND c.user_uuid = ?3");
+        sql.push_str(" AND c.uuid IN (SELECT cipher_uuid FROM access WHERE read_only = 0)");
         params.push(uid.into());
     }
 
@@ -620,6 +623,26 @@ pub(crate) async fn list_attachment_keys_for_user(
     Ok(map_rows_to_keys(rows))
 }
 
+pub(crate) async fn list_attachment_keys_for_org(
+    db: &crate::db::Db,
+    org_id: &str,
+) -> Result<Vec<String>, AppError> {
+    let rows: Vec<AttachmentKeyRow> = db
+        .prepare(
+            "SELECT a.cipher_uuid AS cipher_id, a.id FROM attachments a \
+             JOIN ciphers c ON a.cipher_uuid = c.uuid \
+             WHERE c.organization_uuid = ?1",
+        )
+        .bind(&[org_id.into()])?
+        .all()
+        .await
+        .map_err(|_| AppError::Database)?
+        .results()
+        .map_err(|_| AppError::Database)?;
+
+    Ok(map_rows_to_keys(rows))
+}
+
 pub(crate) async fn list_attachment_keys_for_soft_deleted_before(
     db: &crate::db::Db,
     cutoff_exclusive: &str,
@@ -645,8 +668,27 @@ pub(crate) async fn ensure_cipher_for_user(
     cipher_id: &str,
     user_id: &str,
 ) -> Result<CipherDBModel, AppError> {
+    ensure_cipher_access(db, cipher_id, user_id, false).await
+}
+
+/// Cipher visible to the user; with `write`, the user must also be allowed to modify it
+/// (personal owner or non-read-only organization access).
+pub(crate) async fn ensure_writable_cipher_for_user(
+    db: &crate::db::Db,
+    cipher_id: &str,
+    user_id: &str,
+) -> Result<CipherDBModel, AppError> {
+    ensure_cipher_access(db, cipher_id, user_id, true).await
+}
+
+async fn ensure_cipher_access(
+    db: &crate::db::Db,
+    cipher_id: &str,
+    user_id: &str,
+    write: bool,
+) -> Result<CipherDBModel, AppError> {
     let cipher: Option<CipherDBModel> = db
-        .prepare("SELECT * FROM wk_ciphers WHERE id = ?1 AND user_id = ?2")
+        .prepare(crate::models::cipher::CipherDBModel::select_for_user_sql())
         .bind(&[cipher_id.into(), user_id.into()])?
         .first(None)
         .await
@@ -654,9 +696,9 @@ pub(crate) async fn ensure_cipher_for_user(
 
     let cipher = cipher.ok_or_else(|| AppError::NotFound("Cipher not found".to_string()))?;
 
-    if cipher.organization_id.is_some() {
-        return Err(AppError::BadRequest(
-            "Organization attachments are not supported".to_string(),
+    if write && cipher.read_only != 0 {
+        return Err(AppError::Unauthorized(
+            "Cipher is not write accessible".to_string(),
         ));
     }
 

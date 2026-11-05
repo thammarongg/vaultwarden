@@ -106,6 +106,9 @@ const CIPHER_CHILD_TABLES: &[(&str, &str)] = &[
 /// `?1..?n` placeholders) together with their child rows, children first. D1 enforces foreign
 /// keys and the vaultwarden schema has no cascades, so callers must use this instead of a bare
 /// `DELETE FROM ciphers`. Run the result with `db.batch(...)` (atomic).
+///
+/// `cond` must not depend on child rows (e.g. the `org_access` CTEs read
+/// `ciphers_collections`, which is deleted first): resolve such ids beforehand.
 pub fn delete_ciphers_statements(
     db: &Db,
     cond: &str,

@@ -18,7 +18,7 @@ pub mod send;
 
 pub(crate) const JWT_VALIDATION_LEEWAY_SECS: u64 = 60;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String,    // User ID
     pub sstamp: String, // Security stamp

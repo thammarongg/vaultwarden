@@ -10,6 +10,7 @@ pub mod folders;
 pub mod identity;
 pub mod import;
 pub mod meta;
+pub mod organizations;
 pub mod purge;
 pub mod sends;
 pub mod streaming;

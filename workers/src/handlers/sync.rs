@@ -89,6 +89,10 @@ pub async fn get_sync_data(
 
     // Serialize profile and folders (small data, acceptable CPU cost)
     let mut profile = Profile::from_user(user, two_factor_enabled)?;
+    profile.organizations =
+        crate::handlers::organizations::profile_organizations(&db, &user_id).await?;
+    let collections_json =
+        crate::handlers::organizations::sync_collections_json(&db, &user_id).await?;
     // Match vaultwarden semantics: `_status` is `Invited` when no master password is set.
     // We don't implement org invitations, but this helps clients interpret the account state.
     profile.status = if has_master_password { 0 } else { 1 };
@@ -126,12 +130,14 @@ pub async fn get_sync_data(
     response.push_str(&profile_json);
     response.push_str(",\"folders\":");
     response.push_str(&folders_json);
-    response.push_str(",\"collections\":[],\"policies\":[],\"ciphers\":");
+    response.push_str(",\"collections\":");
+    response.push_str(&collections_json);
+    response.push_str(",\"policies\":[],\"ciphers\":");
     ciphers::append_cipher_json_array_raw(
         &mut response,
         &db,
         include_attachments,
-        "WHERE c.user_id = ?1",
+        "",
         &[user_id.clone().into()],
         "",
         force_row_query,
