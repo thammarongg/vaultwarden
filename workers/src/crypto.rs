@@ -24,7 +24,7 @@ const KEY_LENGTH_BITS: u32 = 256;
 
 /// Gets the Crypto interface from the global scope.
 /// Works in Cloudflare Workers by using js_sys::Reflect instead of WorkerGlobalScope.
-fn get_crypto() -> Result<Crypto, AppError> {
+pub(crate) fn get_crypto() -> Result<Crypto, AppError> {
     let global = js_sys::global();
     let crypto_value = js_sys::Reflect::get(&global, &JsValue::from_str("crypto"))
         .map_err(|e| AppError::Crypto(format!("Failed to get crypto property: {:?}", e)))?;
@@ -35,7 +35,7 @@ fn get_crypto() -> Result<Crypto, AppError> {
 }
 
 /// Gets the SubtleCrypto interface from the global scope.
-fn subtle_crypto() -> Result<SubtleCrypto, AppError> {
+pub(crate) fn subtle_crypto() -> Result<SubtleCrypto, AppError> {
     Ok(get_crypto()?.subtle())
 }
 
@@ -329,6 +329,25 @@ pub fn generate_api_key() -> Result<String, AppError> {
         for b in bytes.to_vec() {
             if b < 248 && out.len() < 30 {
                 out.push(ALPHABET[(b % 62) as usize] as char);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Numeric email 2FA code (vaultwarden `generate_email_token`, default 6 digits).
+pub fn generate_email_token(len: usize) -> Result<String, AppError> {
+    let crypto = get_crypto()?;
+    let mut out = String::with_capacity(len);
+    while out.len() < len {
+        let bytes = Uint8Array::new_with_length(32);
+        crypto
+            .get_random_values_with_array_buffer_view(&bytes)
+            .map_err(|e| AppError::Crypto(format!("Failed to generate email token: {:?}", e)))?;
+        // Rejection sampling keeps the digits uniform (250 = 25 * 10).
+        for b in bytes.to_vec() {
+            if b < 250 && out.len() < len {
+                out.push(char::from(b'0' + b % 10));
             }
         }
     }

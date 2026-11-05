@@ -8,7 +8,7 @@ use worker::Env;
 use crate::handlers::{
     accounts, attachments, auth_requests, ciphers, config, devices, domains, emergency_access,
     folders, identity, import, meta, org_admin, org_groups, org_policies, organizations, sends,
-    sync, twofactor, webauth,
+    sync, twofactor, twofactor_email, webauth, webauthn,
 };
 
 pub fn api_router(env: Env) -> Router {
@@ -629,5 +629,41 @@ pub fn api_router(env: Env) -> Router {
             put(twofactor::disable_twofactor_put),
         )
         .route("/api/two-factor/get-recover", post(twofactor::get_recover))
+        .route(
+            "/api/two-factor/get-email",
+            post(twofactor_email::get_email),
+        )
+        .route(
+            "/api/two-factor/send-email",
+            post(twofactor_email::send_email),
+        )
+        .route(
+            "/api/two-factor/email",
+            put(twofactor_email::enable_email)
+                .post(twofactor_email::enable_email)
+                .delete(twofactor_email::disable_email),
+        )
+        .route(
+            "/api/two-factor/send-email-login",
+            post(twofactor_email::send_email_login),
+        )
+        .route(
+            "/api/two-factor/get-webauthn",
+            post(webauthn::get_webauthn),
+        )
+        .route(
+            "/api/two-factor/get-webauthn-challenge",
+            post(webauthn::get_webauthn_challenge),
+        )
+        .route(
+            "/api/two-factor/webauthn",
+            post(webauthn::activate_webauthn)
+                .put(webauthn::activate_webauthn)
+                .delete(webauthn::delete_webauthn),
+        )
+        .route(
+            "/api/two-factor/webauthn/all",
+            delete(webauthn::delete_all_webauthn),
+        )
         .with_state(app_state)
 }

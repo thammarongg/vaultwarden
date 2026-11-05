@@ -19,7 +19,9 @@ pub mod sends;
 pub mod streaming;
 pub mod sync;
 pub mod twofactor;
+pub mod twofactor_email;
 pub mod webauth;
+pub mod webauthn;
 
 use axum::http::HeaderMap;
 

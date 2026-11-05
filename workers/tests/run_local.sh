@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Resets the local D1 database, applies sql/schema.sql, starts `wrangler dev --local`, runs
-# tests/smoke.py, tests/smoke_orgs.py and tests/smoke_emergency.py, then restarts it with mail enabled (mock API) for
+# tests/smoke.py, smoke_orgs.py, smoke_emergency.py and smoke_2fa.py, then restarts it with mail enabled (mock API) for
 # tests/smoke_mail.py. Local state only: never touches remote resources.
 #
 # Env: PORT (default 8787), WRANGLER_VERSION (default latest), SKIP_BUILD=1 to reuse build/.
@@ -81,6 +81,14 @@ start_server "${LOG}"
 SMOKE_BASE_URL="${BASE_URL}" python3 -I tests/smoke.py || STATUS=$?
 [ "${STATUS}" -eq 0 ] && { SMOKE_BASE_URL="${BASE_URL}" python3 -I tests/smoke_orgs.py || STATUS=$?; }
 [ "${STATUS}" -eq 0 ] && { SMOKE_BASE_URL="${BASE_URL}" python3 -I tests/smoke_emergency.py || STATUS=$?; }
+# WebAuthn needs ECDSA signing: `cryptography` via uv (skipped with a warning when uv is missing).
+if [ "${STATUS}" -eq 0 ]; then
+  if command -v uv >/dev/null 2>&1; then
+    SMOKE_BASE_URL="${BASE_URL}" uv run -q --with cryptography python tests/smoke_2fa.py || STATUS=$?
+  else
+    echo "WARNING: uv not found, tests/smoke_2fa.py skipped" >&2
+  fi
+fi
 
 # Handlers swallow nothing here, but the cron purge only reports failures in the log.
 if grep -E 'Purge .* failed' "${LOG}" >&2; then

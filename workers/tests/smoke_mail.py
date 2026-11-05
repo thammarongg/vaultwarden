@@ -210,6 +210,50 @@ def test_emergency():
     eq(emails, [grantee.email], "failed invite rolled back")
 
 
+def last_code(email):
+    found = mails_to(email, "Login Verification Code")
+    check(found, f"2FA code mailed to {email}")
+    return found[-1]["text"].split("code is: ", 1)[1].split()[0]
+
+
+def test_email_2fa():
+    section("mail: email two-step login")
+    u = User("mail-2fa")
+    r = u.api("POST", "/api/two-factor/get-email", body=u.auth).json
+    eq(r["email"], {"enabled": False, "email": None}, "email 2FA off")
+    uvt = r["userVerificationToken"]
+    target = f"second-{RUN}@example.com"
+    u.api("POST", "/api/two-factor/send-email", body={"email": target, "userVerificationToken": uvt})
+    code = last_code(target)
+    eq(len(code), 6, "6-digit code")
+    u.api("PUT", "/api/two-factor/email", body={"email": target, "token": "000000" if code != "000000" else "111111", "userVerificationToken": uvt}, expect=400)
+    u.api("PUT", "/api/two-factor/email", body={"email": target, "token": code, "userVerificationToken": uvt})
+    eq([p["type"] for p in u.api("GET", "/api/two-factor").json["data"]], [1], "email provider on")
+
+    before = len(mails_to(target, "Login Verification Code"))
+    _, r = login(u.email, u.password, expect=400)
+    eq(r.json["TwoFactorProviders"], ["1"], "email challenge")
+    check(r.json["TwoFactorProviders2"]["1"]["Email"].startswith("se**") and r.json["TwoFactorProviders2"]["1"]["Email"].endswith("@example.com"), "obscured address")
+    eq(len(mails_to(target, "Login Verification Code")), before + 1, "only provider: code sent at once")
+    code = last_code(target)
+    _, r = login(u.email, u.password, twoFactorToken=code, twoFactorProvider="1")
+    check(r.json.get("access_token"), "email code login")
+    login(u.email, u.password, twoFactorToken=code, twoFactorProvider="1", expect=400)  # spent
+
+    # Codes on request; three wrong tries burn the code.
+    call("POST", "/api/two-factor/send-email-login", body={"email": u.email, "masterPasswordHash": "wrong"}, expect=400)
+    call("POST", "/api/two-factor/send-email-login", body={"email": u.email, "masterPasswordHash": u.password})
+    code = last_code(target)
+    for _ in range(3):
+        login(u.email, u.password, twoFactorToken="999999" if code != "999999" else "888888", twoFactorProvider="1", expect=400)
+    login(u.email, u.password, twoFactorToken=code, twoFactorProvider="1", expect=400)
+
+    uvt = u.api("POST", "/api/two-factor/get-email", body=u.auth).json["userVerificationToken"]
+    u.api("DELETE", "/api/two-factor/email", body={"userVerificationToken": uvt})
+    eq(u.api("GET", "/api/two-factor").json["data"], [], "email 2FA off again")
+    login(u.email, u.password)
+
+
 def main():
     server = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), MailMock)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -218,6 +262,7 @@ def main():
         owner, org_id, eve, mid = test_invites()
         test_recovery(owner, org_id, eve, mid)
         test_emergency()
+        test_email_2fa()
     except Failure as e:
         print(f"FAIL: {e}", file=sys.stderr)
         return 1

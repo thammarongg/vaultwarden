@@ -361,3 +361,11 @@ pub async fn send_emergency_recovery_timed_out(
     )
     .await
 }
+
+/// vaultwarden `send_token` (email 2FA code).
+pub async fn send_twofactor_token(env: &Env, to: &str, token: &str) -> Result<(), AppError> {
+    let text = format!(
+        "Your two-step verification code is: {token}\n\nUse this code to complete logging in with AsDevWishes Vault.{FOOTER}"
+    );
+    send_email(env, to, "AsDevWishes Vault Login Verification Code", &text).await
+}

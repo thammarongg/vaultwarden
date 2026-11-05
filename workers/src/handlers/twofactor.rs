@@ -33,12 +33,18 @@ pub(crate) async fn list_user_twofactors(
 
 /// Whether the user has 2FA enabled.
 ///
-/// For now, we intentionally only treat Authenticator (TOTP) as a real 2FA provider.
-/// Remember-device tokens are never considered a 2FA method by themselves.
+/// Login providers: Authenticator (TOTP), Email and WebAuthn. Remember-device tokens are never
+/// a 2FA method by themselves.
+pub(crate) const LOGIN_PROVIDERS: [i32; 3] = [
+    TwoFactorType::Authenticator as i32,
+    TwoFactorType::Email as i32,
+    TwoFactorType::Webauthn as i32,
+];
+
 pub(crate) fn is_twofactor_enabled(twofactors: &[TwoFactor]) -> bool {
     twofactors
         .iter()
-        .any(|tf| tf.enabled && tf.atype == TwoFactorType::Authenticator as i32)
+        .any(|tf| tf.enabled && LOGIN_PROVIDERS.contains(&tf.atype))
 }
 
 /// GET /api/two-factor - Get all enabled 2FA providers for current user
@@ -99,10 +105,14 @@ pub async fn get_authenticator(
         None => (false, generate_totp_secret()?),
     };
 
+    // Current web vaults read `authenticator` + `userVerificationToken` (vaultwarden #7563);
+    // older ones read the flat fields.
     Ok(Json(serde_json::json!({
         "enabled": enabled,
         "key": key,
-        "object": "twoFactorAuthenticator"
+        "object": "twoFactorAuthenticator",
+        "authenticator": { "enabled": enabled, "key": key },
+        "userVerificationToken": crate::handlers::twofactor_email::authenticator_token(&env, &user_id, &key, enabled)?,
     })))
 }
 
@@ -125,11 +135,14 @@ pub async fn activate_authenticator(
         .ok_or_else(|| AppError::Unauthorized("User not found".to_string()))?;
     let user: User = serde_json::from_value(user_value).map_err(|_| AppError::Internal)?;
 
-    validate_password_or_otp(
+    crate::handlers::twofactor_email::verify_token_or_password(
         &user,
-        &PasswordOrOtpData {
-            master_password_hash: data.master_password_hash,
-            otp: data.otp,
+        data.user_verification_token.as_deref(),
+        data.master_password_hash.as_deref(),
+        |t| {
+            crate::handlers::twofactor_email::validate_authenticator(
+                &env, t, &user_id, &data.key, false,
+            )
         },
     )
     .await?;
@@ -200,7 +213,8 @@ pub async fn activate_authenticator(
     Ok(Json(serde_json::json!({
         "enabled": true,
         "key": key,
-        "object": "twoFactorAuthenticator"
+        "object": "twoFactorAuthenticator",
+        "authenticator": { "enabled": true, "key": key },
     })))
 }
 
@@ -258,7 +272,7 @@ pub async fn disable_twofactor(
 
     log::info!("User {} disabled 2FA type {}", user_id, type_);
 
-    clear_recovery_if_no_twofactor(&db, &user_id).await?;
+    after_provider_removed(&db, &user_id).await?;
 
     Ok(Json(serde_json::json!({
         "enabled": false,
@@ -276,7 +290,8 @@ pub async fn disable_authenticator(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&env)?;
 
-    if data.r#type != TwoFactorType::Authenticator as i32 {
+    let atype = data.r#type.unwrap_or(TwoFactorType::Authenticator as i32);
+    if atype != TwoFactorType::Authenticator as i32 {
         return Err(AppError::BadRequest("Invalid two factor type".to_string()));
     }
 
@@ -290,11 +305,14 @@ pub async fn disable_authenticator(
         .ok_or_else(|| AppError::Unauthorized("User not found".to_string()))?;
     let user: User = serde_json::from_value(user_value).map_err(|_| AppError::Internal)?;
 
-    validate_password_or_otp(
+    crate::handlers::twofactor_email::verify_token_or_password(
         &user,
-        &PasswordOrOtpData {
-            master_password_hash: data.master_password_hash,
-            otp: data.otp,
+        data.user_verification_token.as_deref(),
+        data.master_password_hash.as_deref(),
+        |t| {
+            crate::handlers::twofactor_email::validate_authenticator(
+                &env, t, &user_id, &data.key, true,
+            )
         },
     )
     .await?;
@@ -302,7 +320,7 @@ pub async fn disable_authenticator(
     // Fetch existing TOTP and verify key matches before deleting
     let existing: Option<TwoFactor> = db
         .prepare("SELECT * FROM twofactor WHERE user_uuid = ?1 AND atype = ?2")
-        .bind(&[user_id.clone().into(), data.r#type.into()])?
+        .bind(&[user_id.clone().into(), atype.into()])?
         .first(None)
         .await
         .map_err(|_| AppError::Database)?
@@ -326,17 +344,13 @@ pub async fn disable_authenticator(
         .await
         .map_err(|_| AppError::Database)?;
 
-    log::info!(
-        "User {} disabled authenticator (2FA type {})",
-        user_id,
-        data.r#type
-    );
+    log::info!("User {} disabled authenticator", user_id);
 
-    clear_recovery_if_no_twofactor(&db, &user_id).await?;
+    after_provider_removed(&db, &user_id).await?;
 
     Ok(Json(serde_json::json!({
         "enabled": false,
-        "type": data.r#type,
+        "type": atype,
         "object": "twoFactorProvider"
     })))
 }
@@ -394,7 +408,7 @@ async fn validate_password_or_otp(user: &User, data: &PasswordOrOtpData) -> Resu
     Err(AppError::Unauthorized("Invalid password".to_string()))
 }
 
-async fn generate_recovery_code_for_user(
+pub(crate) async fn generate_recovery_code_for_user(
     db: &crate::db::Db,
     user_id: &str,
 ) -> Result<(), AppError> {
@@ -458,4 +472,19 @@ async fn clear_recovery_if_no_twofactor(db: &crate::db::Db, user_id: &str) -> Re
     }
 
     Ok(())
+}
+
+/// vaultwarden `check_2fa_state`: after a provider is removed no remembered device may keep
+/// skipping the ones left, and once none is left the recovery code goes and the 2FA policy applies.
+pub(crate) async fn after_provider_removed(db: &crate::db::Db, user_id: &str) -> Result<(), AppError> {
+    d1_query!(
+        db,
+        "UPDATE devices SET twofactor_remember = NULL WHERE user_uuid = ?1",
+        user_id
+    )
+    .map_err(|_| AppError::Database)?
+    .run()
+    .await
+    .map_err(|_| AppError::Database)?;
+    clear_recovery_if_no_twofactor(db, user_id).await
 }

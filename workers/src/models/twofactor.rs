@@ -13,6 +13,10 @@ pub enum TwoFactorType {
     OrganizationDuo = 6,
     Webauthn = 7,
     RecoveryCode = 8,
+    // Internal states (vaultwarden: >= 1000 are never providers).
+    EmailVerificationChallenge = 1002,
+    WebauthnRegisterChallenge = 1003,
+    WebauthnLoginChallenge = 1004,
 }
 
 impl TwoFactorType {
@@ -99,7 +103,10 @@ pub struct EnableAuthenticatorData {
     pub key: String,
     pub token: String,
     pub master_password_hash: Option<String>,
+    #[allow(dead_code)] // OTP verification is not implemented
     pub otp: Option<String>,
+    /// Current web vaults (vaultwarden #7563) send this instead of the password.
+    pub user_verification_token: Option<String>,
 }
 
 /// POST /api/two-factor/disable - Disable a 2FA method
@@ -118,7 +125,9 @@ pub struct DisableTwoFactorData {
 pub struct DisableAuthenticatorData {
     pub key: String,
     pub master_password_hash: Option<String>,
+    #[allow(dead_code)] // OTP verification is not implemented
     pub otp: Option<String>,
     #[serde(rename = "type")]
-    pub r#type: i32,
+    pub r#type: Option<i32>,
+    pub user_verification_token: Option<String>,
 }
