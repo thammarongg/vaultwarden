@@ -105,7 +105,7 @@ fn form_encode(s: &str) -> String {
     out
 }
 
-const FOOTER: &str = "\n\n===\nThis email was sent by Vaultwarden (vault.asdevwishes.com).";
+const FOOTER: &str = "\n\n===\nThis email was sent by AsDevWishes Vault (vault.asdevwishes.com).";
 
 /// vaultwarden `send_org_invite`.
 pub async fn send_invite(
@@ -159,7 +159,7 @@ pub async fn send_invite_accepted(
 /// vaultwarden `send_invite_confirmed`.
 pub async fn send_invite_confirmed(env: &Env, to: &str, org_name: &str) -> Result<(), AppError> {
     let text = format!(
-        "This email is to notify you that you have been confirmed as a user of {org_name}.\nAny collections and logins being shared with you by this organization will now appear in your Vaultwarden vault at {}.{FOOTER}",
+        "This email is to notify you that you have been confirmed as a user of {org_name}.\nAny collections and logins being shared with you by this organization will now appear in your vault at {}.{FOOTER}",
         domain(env)
     );
     send_email(

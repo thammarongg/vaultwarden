@@ -51,7 +51,7 @@ def last_invite(email):
     found = mails_to(email, "Join ")
     check(found, f"invite email to {email}")
     m = found[-1]
-    check(m["from"] == "Vaultwarden <no-reply@vault.asdevwishes.com>", f"from: {m['from']}")
+    check(m["from"] == "AsDevWishes Vault <no-reply@vault.asdevwishes.com>", f"from: {m['from']}")
     url = next(w for w in m["text"].split() if "/#/accept-organization/?" in w)
     q = urllib.parse.parse_qs(url.split("?", 1)[1])
     for key in ("email", "organizationName", "organizationId", "organizationUserId", "token",
