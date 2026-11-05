@@ -25,6 +25,7 @@ pub async fn import_data(
     Json(data): Json<ImportRequest>,
 ) -> Result<Json<()>, AppError> {
     let db = db::get_db(&env)?;
+    crate::handlers::org_policies::enforce_personal_ownership(&db, &claims.sub).await?;
     let now = db::now_string();
     let batch_size = get_batch_size(&env);
 

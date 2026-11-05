@@ -176,6 +176,9 @@ async fn create_cipher_impl(
     validate_folder_ownership(&db, data.folder_id.as_deref(), &claims.sub).await?;
     let org_id = data.organization_id.clone().filter(|o| !o.is_empty());
     let collection_ids = collection_ids.unwrap_or_default();
+    if org_id.is_none() {
+        crate::handlers::org_policies::enforce_personal_ownership(&db, &claims.sub).await?;
+    }
     if let Some(org_id) = &org_id {
         let cols = (!collection_ids.is_empty()).then_some(collection_ids.as_slice());
         check_org_write(&db, &claims.sub, org_id, cols).await?;
@@ -284,6 +287,9 @@ async fn update_cipher_impl(
     }
     // Moving a personal cipher into an organization (share, or PUT with organizationId).
     let moving_to_org = existing.organization_id.is_none() && new_org.is_some();
+    if new_org.is_none() {
+        crate::handlers::org_policies::enforce_personal_ownership(&db, &claims.sub).await?;
+    }
     if let Some(org_id) = &new_org {
         if moving_to_org || share_to.is_some() {
             check_org_write(&db, &claims.sub, org_id, share_to.as_deref()).await?;
@@ -1786,4 +1792,175 @@ pub(crate) async fn append_from_rows(
     }
     out.push(']');
     Ok(())
+}
+
+/// GET /api/organizations/{org_id}/export (admins): `{collections, ciphers}`.
+#[worker::send]
+pub async fn export_organization(
+    claims: Claims,
+    State(env): State<Arc<Env>>,
+    Path(org_id): Path<String>,
+) -> Result<RawJson, AppError> {
+    use crate::handlers::organizations as orgs;
+    let db = db::get_db(&env)?;
+    orgs::require_role(
+        &db,
+        &claims.sub,
+        &org_id,
+        crate::models::org_access::membership_type::ADMIN,
+    )
+    .await?;
+    let collections = orgs::org_collections_json(&db, &org_id).await?;
+    let mut body = String::from("{\"collections\":");
+    body.push_str(&serde_json::to_string(&collections).map_err(|_| AppError::Internal)?);
+    body.push_str(",\"ciphers\":");
+    append_cipher_json_array_raw(
+        &mut body,
+        &db,
+        attachments::attachments_enabled(env.as_ref()),
+        "WHERE c.organization_uuid = ?2",
+        &[claims.sub.into(), org_id.into()],
+        "",
+        crate::handlers::ciphers_default_row_query(env.as_ref()),
+    )
+    .await?;
+    body.push('}');
+    Ok(RawJson(body))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgImportCollection {
+    name: String,
+    id: Option<String>,
+    external_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct OrgImportRelation {
+    key: usize,
+    value: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgImportData {
+    ciphers: Vec<CipherRequestData>,
+    #[serde(default)]
+    collections: Vec<OrgImportCollection>,
+    #[serde(default)]
+    collection_relationships: Vec<OrgImportRelation>,
+}
+
+/// POST /api/ciphers/import-organization?organizationId= (vaultwarden `post_org_import`)
+#[worker::send]
+pub async fn import_organization(
+    claims: Claims,
+    State(env): State<Arc<Env>>,
+    axum::extract::Query(q): axum::extract::Query<OrgIdQuery>,
+    Json(data): Json<OrgImportData>,
+) -> Result<Json<()>, AppError> {
+    use crate::handlers::organizations as orgs;
+    use crate::models::org_access::{membership_status, membership_type};
+    let db = db::get_db(&env)?;
+    let org_id = q.organization_id;
+    let m = orgs::find_membership(&db, &claims.sub, &org_id)
+        .await?
+        .filter(|m| m.status == membership_status::CONFIRMED)
+        .ok_or_else(|| {
+            AppError::BadRequest(
+                "You need to be a Member of the Organization to call this endpoint".into(),
+            )
+        })?;
+    let is_admin = orgs::role_rank(m.atype) >= orgs::role_rank(membership_type::ADMIN);
+    let existing = orgs::org_collection_ids(&db, &org_id).await?;
+    let writable = orgs::writable_collection_ids(&db, &claims.sub, &org_id).await?;
+    let now = db::now_string();
+    let mut stmts = Vec::new();
+    let mut collections = Vec::with_capacity(data.collections.len());
+    for col in data.collections {
+        let id = match col.id.filter(|id| existing.contains(id)) {
+            Some(id) => {
+                if !is_admin && !writable.contains(&id) {
+                    return Err(AppError::BadRequest(
+                        "The current user isn't allowed to manage this collection".into(),
+                    ));
+                }
+                id
+            }
+            None => {
+                if !orgs::has_full_access(&m) {
+                    return Err(AppError::BadRequest(
+                        "The current user isn't allowed to create new collections".into(),
+                    ));
+                }
+                let id = Uuid::new_v4().to_string();
+                stmts.push(
+                    d1_query!(
+                        &db,
+                        "INSERT INTO collections (uuid, org_uuid, name, external_id) VALUES (?1, ?2, ?3, ?4)",
+                        id,
+                        org_id,
+                        col.name,
+                        col.external_id
+                    )
+                    .map_err(|_| AppError::Database)?,
+                );
+                id
+            }
+        };
+        collections.push(id);
+    }
+    let mut ciphers = Vec::with_capacity(data.ciphers.len());
+    for cd in data.ciphers {
+        let id = Uuid::new_v4().to_string();
+        let r#type = cd.r#type;
+        let blob = serde_json::to_value(CipherData::new(cd.name, cd.notes, cd.type_fields))
+            .map_err(|_| AppError::Internal)?;
+        stmts.extend(
+            crate::models::cipher::create_cipher_stmts(
+                &db,
+                &id,
+                &claims.sub,
+                Some(&org_id),
+                r#type,
+                &blob,
+                None,
+                false,
+                None,
+                &now,
+                &now,
+            )
+            .map_err(|_| AppError::Database)?,
+        );
+        ciphers.push(id);
+    }
+    for rel in data.collection_relationships {
+        let (Some(cid), Some(col)) = (ciphers.get(rel.key), collections.get(rel.value)) else {
+            return Err(AppError::BadRequest(
+                "Invalid collection relationship".into(),
+            ));
+        };
+        stmts.push(
+            d1_query!(
+                &db,
+                "INSERT OR IGNORE INTO ciphers_collections (cipher_uuid, collection_uuid) VALUES (?1, ?2)",
+                cid,
+                col
+            )
+            .map_err(|_| AppError::Database)?,
+        );
+    }
+    db::execute_in_batches(&db, stmts, crate::handlers::get_batch_size(&env)).await?;
+    let audience = crate::models::org_access::cipher_audience(&db, &ciphers, &claims.sub).await?;
+    crate::models::org_access::notify_audience(env.as_ref(), &db, audience, &now).await?;
+    db::touch_user_updated_at(&db, &claims.sub, &now).await?;
+    notifications::publish_user_update(
+        (*env).clone(),
+        claims.sub,
+        UpdateType::SyncVault,
+        now,
+        Some(claims.device),
+    );
+    Ok(Json(()))
 }

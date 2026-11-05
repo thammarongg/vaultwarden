@@ -377,7 +377,7 @@ fn now() -> String {
     db::now_string()
 }
 
-async fn touch_org_members(db: &db::Db, org_id: &str) -> Result<(), AppError> {
+pub async fn touch_org_members(db: &db::Db, org_id: &str) -> Result<(), AppError> {
     d1_query!(
         db,
         "UPDATE users SET updated_at = ?1 WHERE uuid IN (SELECT user_uuid FROM users_organizations WHERE org_uuid = ?2 AND status = 2)",
@@ -644,10 +644,11 @@ pub async fn get_org_keys(
     let org = find_org(&db, &org_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Organization not found".to_string()))?;
+    // vaultwarden answers /keys with the public key only; the encrypted private key is only
+    // handed out for account recovery (reset-password-details).
     Ok(Json(json!({
-        "object": "organizationKeys",
+        "object": "organizationPublicKey",
         "publicKey": org.public_key,
-        "privateKey": org.private_key,
     })))
 }
 
@@ -982,7 +983,7 @@ pub async fn get_collection_users(
     Ok(Json(json!(data)))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AccessSelection {
     id: String,
@@ -1413,34 +1414,6 @@ pub async fn get_billing_metadata() -> Json<Value> {
         "isSubscriptionCanceled": false,
         "organizationOccupiedSeats": 0
     }))
-}
-
-/// GET /api/organizations/{org_id}/policies (policies land in 3.4)
-#[worker::send]
-pub async fn get_org_policies(
-    claims: Claims,
-    State(env): State<Arc<Env>>,
-    Path(org_id): Path<String>,
-) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&env)?;
-    require_role(&db, &claims.sub, &org_id, membership_type::USER).await?;
-    Ok(Json(
-        json!({"data": [], "object": "list", "continuationToken": null}),
-    ))
-}
-
-/// GET /api/organizations/{org_id}/groups (groups land in 3.3)
-#[worker::send]
-pub async fn get_org_groups(
-    claims: Claims,
-    State(env): State<Arc<Env>>,
-    Path(org_id): Path<String>,
-) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&env)?;
-    require_role(&db, &claims.sub, &org_id, membership_type::MANAGER).await?;
-    Ok(Json(
-        json!({"data": [], "object": "list", "continuationToken": null}),
-    ))
 }
 
 /// GET /api/organizations/{identifier}/auto-enroll-status
@@ -1883,6 +1856,14 @@ async fn confirm_impl(
     if m.status != membership_status::ACCEPTED {
         return Err(AppError::BadRequest("User in invalid state".to_string()));
     }
+    crate::handlers::org_policies::check_user_allowed(
+        db,
+        &m,
+        m.atype,
+        membership_status::CONFIRMED,
+        "confirm",
+    )
+    .await?;
     let now = now();
     db.batch(vec![
         d1_query!(
@@ -2074,6 +2055,8 @@ pub async fn edit_member(
             "Can't delete the last owner".to_string(),
         ));
     }
+    crate::handlers::org_policies::check_user_allowed(&db, &m, new_type, m.status, "modify")
+        .await?;
     let collections = data.collections.unwrap_or_default();
     check_collections_exist(&db, &org_id, &collections).await?;
     let mut stmts = vec![
@@ -2287,7 +2270,10 @@ async fn revoke_impl(
         if m.status >= membership_status::INVITED {
             return Err(AppError::BadRequest("Already active".to_string()));
         }
-        m.status + ACTIVATE_REVOKE_DIFF
+        let restored = m.status + ACTIVATE_REVOKE_DIFF;
+        crate::handlers::org_policies::check_user_allowed(db, &m, m.atype, restored, "restore")
+            .await?;
+        restored
     };
     db.batch(vec![
         d1_query!(
@@ -2410,4 +2396,162 @@ pub fn accept_invitations_stmts(
         d1_query!(db, "DELETE FROM invitations WHERE email = ?1", email)
             .map_err(|_| AppError::Database)?,
     ])
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkAccessData {
+    collection_ids: Vec<String>,
+    #[serde(default)]
+    groups: Vec<AccessSelection>,
+    #[serde(default)]
+    users: Vec<AccessSelection>,
+}
+
+/// POST /api/organizations/{org_id}/collections/bulk-access
+#[worker::send]
+pub async fn bulk_access_collections(
+    claims: Claims,
+    State(env): State<Arc<Env>>,
+    Path(org_id): Path<String>,
+    Json(data): Json<BulkAccessData>,
+) -> Result<Json<Value>, AppError> {
+    let db = db::get_db(&env)?;
+    let m = require_role(&db, &claims.sub, &org_id, membership_type::MANAGER).await?;
+    #[derive(Deserialize)]
+    struct Row {
+        uuid: String,
+    }
+    let group_ids: HashSet<String> = db
+        .prepare("SELECT uuid FROM groups WHERE organizations_uuid = ?1")
+        .bind(&[org_id.clone().into()])?
+        .all()
+        .await?
+        .results::<Row>()?
+        .into_iter()
+        .map(|r| r.uuid)
+        .collect();
+    if let Some(g) = data.groups.iter().find(|g| !group_ids.contains(&g.id)) {
+        return Err(AppError::BadRequest(format!(
+            "Invalid group: Group {} does not belong to organization {org_id}!",
+            g.id
+        )));
+    }
+    let access = CollectionData {
+        name: String::new(),
+        external_id: None,
+        groups: data.groups.clone(),
+        users: data.users.clone(),
+    };
+    let mut stmts = Vec::new();
+    for col_id in &data.collection_ids {
+        find_collection(&db, &org_id, col_id).await?;
+        if !can_manage_collection(&db, &claims.sub, &m, col_id).await? {
+            return Err(AppError::NotFound("Collection not found".to_string()));
+        }
+        stmts.extend(collection_access_statements(&db, &org_id, col_id, &access)?);
+    }
+    if !stmts.is_empty() {
+        db.batch(stmts).await?;
+    }
+    touch_org_members(&db, &org_id).await?;
+    Ok(Json(json!({})))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkCollectionsData {
+    organization_id: String,
+    cipher_ids: Vec<String>,
+    collection_ids: Vec<String>,
+    #[serde(default)]
+    remove_collections: bool,
+}
+
+/// POST /api/ciphers/bulk-collections: add/remove many org ciphers to/from collections.
+#[worker::send]
+pub async fn bulk_cipher_collections(
+    claims: Claims,
+    State(env): State<Arc<Env>>,
+    Json(data): Json<BulkCollectionsData>,
+) -> Result<Json<Value>, AppError> {
+    let db = db::get_db(&env)?;
+    let org_id = &data.organization_id;
+    find_membership(&db, &claims.sub, org_id)
+        .await?
+        .filter(|m| m.status == membership_status::CONFIRMED)
+        .ok_or_else(|| {
+            AppError::BadRequest(
+                "You need to be a Member of the Organization to call this endpoint".to_string(),
+            )
+        })?;
+    let writable = writable_collection_ids(&db, &claims.sub, org_id).await?;
+    if data.collection_ids.iter().any(|c| !writable.contains(c)) {
+        return Err(AppError::NotFound("Resource not found".to_string()));
+    }
+    let cipher_ids = serde_json::to_string(&data.cipher_ids).map_err(|_| AppError::Internal)?;
+    let col_ids = serde_json::to_string(&data.collection_ids).map_err(|_| AppError::Internal)?;
+    // Ciphers the user can write in this org, resolved before any link changes.
+    #[derive(Deserialize)]
+    struct Ids {
+        ids: String,
+    }
+    let ids = db
+        .prepare(format!(
+            "{}SELECT COALESCE(json_group_array(a.cipher_uuid), '[]') AS ids FROM access a
+             JOIN ciphers c ON c.uuid = a.cipher_uuid
+             WHERE a.read_only = 0 AND c.organization_uuid = ?2
+               AND a.cipher_uuid IN (SELECT value FROM json_each(?3))",
+            with_access("?1")
+        ))
+        .bind(&[
+            claims.sub.clone().into(),
+            org_id.clone().into(),
+            cipher_ids.into(),
+        ])?
+        .first::<Ids>(None)
+        .await?
+        .map(|r| r.ids)
+        .unwrap_or_else(|| "[]".to_string());
+    let sql = if data.remove_collections {
+        "DELETE FROM ciphers_collections WHERE cipher_uuid IN (SELECT value FROM json_each(?1))
+           AND collection_uuid IN (SELECT value FROM json_each(?2))"
+    } else {
+        "INSERT OR IGNORE INTO ciphers_collections (cipher_uuid, collection_uuid)
+         SELECT c.value, k.value FROM json_each(?1) c, json_each(?2) k"
+    };
+    let now = now();
+    db.batch(vec![
+        db.prepare(sql)
+            .bind(&[ids.clone().into(), col_ids.into()])?,
+        d1_query!(
+            &db,
+            "UPDATE ciphers SET updated_at = ?1 WHERE uuid IN (SELECT value FROM json_each(?2))",
+            now,
+            ids
+        )
+        .map_err(|_| AppError::Database)?,
+    ])
+    .await?;
+    touch_org_members(&db, org_id).await?;
+    Ok(Json(json!({})))
+}
+
+/// POST /api/organizations/domain/sso/verified (no SSO here: nothing to prefill)
+pub async fn sso_verified_domains() -> Json<Value> {
+    Json(json!({"object": "list", "data": [], "continuationToken": null}))
+}
+
+/// GET /api/organizations/{org_id}/collections as plain JSON (for export).
+pub async fn org_collections_json(db: &db::Db, org_id: &str) -> Result<Vec<Value>, AppError> {
+    let rows: Vec<CollectionRow> = db
+        .prepare("SELECT uuid, org_uuid, name, external_id FROM collections WHERE org_uuid = ?1")
+        .bind(&[org_id.into()])?
+        .all()
+        .await?
+        .results()?;
+    Ok(rows
+        .iter()
+        .map(|c| collection_json(&c.uuid, &c.org_uuid, &c.name, &c.external_id))
+        .collect())
 }

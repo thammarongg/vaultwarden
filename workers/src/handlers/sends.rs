@@ -290,6 +290,12 @@ pub async fn create_text_send(
 
     let (del, exp) =
         validate_send_dates(&payload.deletion_date, payload.expiration_date.as_deref())?;
+    crate::handlers::org_policies::enforce_send_policies(
+        &db::get_db(&env)?,
+        &claims.sub,
+        payload.hide_email.unwrap_or(false),
+    )
+    .await?;
 
     let data = prepare_send_data(&payload)?;
     let text_limit = send_text_max_bytes(&env);
@@ -338,6 +344,12 @@ pub async fn create_file_send_v2(
 
     let (del, exp) =
         validate_send_dates(&payload.deletion_date, payload.expiration_date.as_deref())?;
+    crate::handlers::org_policies::enforce_send_policies(
+        &db::get_db(&env)?,
+        &claims.sub,
+        payload.hide_email.unwrap_or(false),
+    )
+    .await?;
 
     let declared_size: i64 = payload
         .file_length
@@ -455,6 +467,12 @@ pub async fn create_file_send_legacy(
 
     let (del, exp) =
         validate_send_dates(&payload.deletion_date, payload.expiration_date.as_deref())?;
+    crate::handlers::org_policies::enforce_send_policies(
+        &db::get_db(&env)?,
+        &claims.sub,
+        payload.hide_email.unwrap_or(false),
+    )
+    .await?;
 
     let file_bytes = file_bytes.ok_or_else(|| AppError::BadRequest("Missing file data".into()))?;
     let actual_size = file_bytes.len() as i64;
@@ -594,6 +612,12 @@ pub async fn update_send(
 
     let (del, exp) =
         validate_send_dates(&payload.deletion_date, payload.expiration_date.as_deref())?;
+    crate::handlers::org_policies::enforce_send_policies(
+        &db::get_db(&env)?,
+        &claims.sub,
+        payload.hide_email.unwrap_or(false),
+    )
+    .await?;
 
     let db = db::get_db(&env)?;
     let mut send = SendDB::find_by_id_and_user(&db, &send_id, &claims.sub)

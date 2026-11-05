@@ -7,7 +7,8 @@ use worker::Env;
 
 use crate::handlers::{
     accounts, attachments, auth_requests, ciphers, config, devices, domains, emergency_access,
-    folders, identity, import, meta, organizations, sends, sync, twofactor, webauth,
+    folders, identity, import, meta, org_groups, org_policies, organizations, sends, sync,
+    twofactor, webauth,
 };
 
 pub fn api_router(env: Env) -> Router {
@@ -385,14 +386,6 @@ pub fn api_router(env: Env) -> Router {
             put(organizations::restore_member),
         )
         .route(
-            "/api/organizations/{org_id}/policies",
-            get(organizations::get_org_policies),
-        )
-        .route(
-            "/api/organizations/{org_id}/groups",
-            get(organizations::get_org_groups),
-        )
-        .route(
             "/api/organizations/{org_id}/billing/vnext/warnings",
             get(organizations::get_billing_warnings),
         )
@@ -403,6 +396,73 @@ pub fn api_router(env: Env) -> Router {
         .route(
             "/api/organizations/{org_id}/auto-enroll-status",
             get(organizations::get_auto_enroll_status),
+        )
+        // Groups (phase 3.3)
+        .route(
+            "/api/organizations/{org_id}/groups",
+            get(org_groups::get_groups)
+                .post(org_groups::post_group)
+                .delete(org_groups::bulk_delete_groups),
+        )
+        .route(
+            "/api/organizations/{org_id}/groups/details",
+            get(org_groups::get_groups_details),
+        )
+        .route(
+            "/api/organizations/{org_id}/groups/{group_id}",
+            get(org_groups::get_group)
+                .put(org_groups::put_group)
+                .post(org_groups::put_group)
+                .delete(org_groups::delete_group),
+        )
+        .route(
+            "/api/organizations/{org_id}/groups/{group_id}/delete",
+            post(org_groups::delete_group),
+        )
+        .route(
+            "/api/organizations/{org_id}/groups/{group_id}/details",
+            get(org_groups::get_group_details),
+        )
+        .route(
+            "/api/organizations/{org_id}/groups/{group_id}/users",
+            get(org_groups::get_group_members),
+        )
+        // Policies (phase 3.4)
+        .route(
+            "/api/organizations/{org_id}/policies",
+            get(org_policies::list_policies),
+        )
+        .route(
+            "/api/organizations/{org_id}/policies/token",
+            get(org_policies::list_policies_token),
+        )
+        .route(
+            "/api/organizations/{org_id}/policies/{pol_type}",
+            get(org_policies::get_policy).put(org_policies::put_policy),
+        )
+        .route(
+            "/api/organizations/{org_id}/policies/{pol_type}/vnext",
+            put(org_policies::put_policy),
+        )
+        .route(
+            "/api/organizations/{org_id}/collections/bulk-access",
+            post(organizations::bulk_access_collections),
+        )
+        .route(
+            "/api/ciphers/bulk-collections",
+            post(organizations::bulk_cipher_collections),
+        )
+        .route(
+            "/api/organizations/domain/sso/verified",
+            post(organizations::sso_verified_domains),
+        )
+        .route(
+            "/api/organizations/{org_id}/export",
+            get(ciphers::export_organization),
+        )
+        .route(
+            "/api/ciphers/import-organization",
+            post(ciphers::import_organization),
         )
         .route("/api/plans", get(organizations::get_plans))
         .route("/api/config", get(config::config))

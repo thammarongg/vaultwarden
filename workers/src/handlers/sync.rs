@@ -93,6 +93,8 @@ pub async fn get_sync_data(
         crate::handlers::organizations::profile_organizations(&db, &user_id).await?;
     let collections_json =
         crate::handlers::organizations::sync_collections_json(&db, &user_id).await?;
+    let (policies_json, policies_new_json) =
+        crate::handlers::org_policies::sync_policies_json(&db, &user_id).await?;
     // Match vaultwarden semantics: `_status` is `Invited` when no master password is set.
     // We don't implement org invitations, but this helps clients interpret the account state.
     profile.status = if has_master_password { 0 } else { 1 };
@@ -132,7 +134,11 @@ pub async fn get_sync_data(
     response.push_str(&folders_json);
     response.push_str(",\"collections\":");
     response.push_str(&collections_json);
-    response.push_str(",\"policies\":[],\"ciphers\":");
+    response.push_str(",\"policies\":");
+    response.push_str(&policies_json);
+    response.push_str(",\"policiesNew\":");
+    response.push_str(&policies_new_json);
+    response.push_str(",\"ciphers\":");
     ciphers::append_cipher_json_array_raw(
         &mut response,
         &db,

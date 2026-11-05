@@ -66,7 +66,7 @@ def test_org_lifecycle():
     eq(org["hasPublicAndPrivateKeys"], True, "org keys flag")
     eq(owner.api("GET", f"/api/organizations/{org_id}").json["id"], org_id, "get org")
     keys = owner.api("GET", f"/api/organizations/{org_id}/keys").json
-    eq((keys["publicKey"], keys["privateKey"]), ("org-public-key", "2.org-priv|iv|mac"), "org keys")
+    eq((keys["publicKey"], keys.get("privateKey")), ("org-public-key", None), "org keys: public only")
     eq(owner.api("GET", f"/api/organizations/{org_id}/public-key").json["publicKey"], "org-public-key", "public key")
     owner.api("POST", f"/api/organizations/{org_id}/keys",
               body={"encryptedPrivateKey": "x", "publicKey": "y"}, expect=400)

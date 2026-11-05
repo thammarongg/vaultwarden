@@ -171,6 +171,8 @@ pub struct TokenResponse {
     account_keys: serde_json::Value,
     #[serde(rename = "TwoFactorToken", skip_serializing_if = "Option::is_none")]
     two_factor_token: Option<String>,
+    #[serde(rename = "MasterPasswordPolicy")]
+    master_password_policy: serde_json::Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -483,6 +485,7 @@ fn generate_tokens_and_response(
     client_id: &str,
     env: &Arc<Env>,
     two_factor_token: Option<String>,
+    master_password_policy: serde_json::Value,
 ) -> Result<Json<TokenResponse>, AppError> {
     let now = Utc::now();
     let expires_in = Duration::hours(1);
@@ -575,6 +578,7 @@ fn generate_tokens_and_response(
         },
         account_keys,
         two_factor_token,
+        master_password_policy,
     }))
 }
 
@@ -685,6 +689,10 @@ pub async fn token(
                                 .run()
                                 .await
                                 .map_err(|_| AppError::Database)?;
+                            crate::handlers::org_policies::enforce_2fa_policy_for_user(
+                                &db, &user.id,
+                            )
+                            .await?;
                             d1_query!(
                                 &db,
                                 "UPDATE users SET totp_recover = NULL WHERE uuid = ?1",
@@ -757,12 +765,16 @@ pub async fn token(
                 }
             }
 
+            let mpp = crate::handlers::org_policies::pascal_case_keys(
+                crate::handlers::org_policies::master_password_policy(&db, &user.id).await?,
+            );
             generate_tokens_and_response(
                 user,
                 &device,
                 &device_request.client_id,
                 &env,
                 two_factor_remember_token,
+                mpp,
             )
             .map(IntoResponse::into_response)
         }
@@ -811,7 +823,10 @@ pub async fn token(
 
             let client_id = optional_field(payload.client_id.as_deref())
                 .unwrap_or_else(|| "undefined".to_string());
-            generate_tokens_and_response(user, &device, &client_id, &env, None)
+            let mpp = crate::handlers::org_policies::pascal_case_keys(
+                crate::handlers::org_policies::master_password_policy(&db, &user.id).await?,
+            );
+            generate_tokens_and_response(user, &device, &client_id, &env, None, mpp)
                 .map(IntoResponse::into_response)
         }
         "send_access" => generate_send_access_token_response(env.as_ref(), &db, &headers, &payload)

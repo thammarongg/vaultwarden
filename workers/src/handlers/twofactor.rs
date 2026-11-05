@@ -453,6 +453,8 @@ async fn clear_recovery_if_no_twofactor(db: &crate::db::Db, user_id: &str) -> Re
         .run()
         .await
         .map_err(|_| AppError::Database)?;
+        // Organizations requiring 2FA revoke the member once no provider is left.
+        crate::handlers::org_policies::enforce_2fa_policy_for_user(db, user_id).await?;
     }
 
     Ok(())
