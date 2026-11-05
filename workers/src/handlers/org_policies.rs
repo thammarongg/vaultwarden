@@ -45,6 +45,8 @@ pub struct PolicyRow {
 }
 
 const POLICY_COLS: &str = "uuid, org_uuid, atype, enabled, data, revision_date";
+/// `POLICY_COLS` qualified for queries that alias `org_policies` as `p`.
+pub const POLICY_COLS_P: &str = "p.uuid, p.org_uuid, p.atype, p.enabled, p.data, p.revision_date";
 
 pub fn policy_json(p: &PolicyRow) -> Value {
     let data: Value = serde_json::from_str(&p.data).unwrap_or(Value::Null);

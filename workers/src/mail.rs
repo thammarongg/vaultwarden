@@ -199,3 +199,165 @@ pub async fn send_admin_account_recovery(
     )
     .await
 }
+
+// ---------------------------------------------------------------------------
+// Emergency access (vaultwarden `send_emergency_access_*`)
+// ---------------------------------------------------------------------------
+
+/// vaultwarden `send_emergency_access_invite`.
+pub async fn send_emergency_invite(
+    env: &Env,
+    to: &str,
+    emer_id: &str,
+    grantor_name: &str,
+    token: &str,
+) -> Result<(), AppError> {
+    let query = [
+        ("id", emer_id),
+        ("name", grantor_name),
+        ("email", to),
+        ("token", token),
+    ]
+    .iter()
+    .map(|(k, v)| format!("{k}={}", form_encode(v)))
+    .collect::<Vec<_>>()
+    .join("&");
+    let url = format!("{}/#/accept-emergency/?{query}", domain(env));
+    let text = format!(
+        "You have been invited to become an emergency contact for {grantor_name}. To accept this invite, click the following link:\n\nClick here to join: {url}\n\nIf you do not wish to become an emergency contact for {grantor_name}, you can safely ignore this email.{FOOTER}"
+    );
+    send_email(
+        env,
+        to,
+        &format!("Emergency access for {grantor_name}"),
+        &text,
+    )
+    .await
+}
+
+pub async fn send_emergency_invite_accepted(
+    env: &Env,
+    to: &str,
+    grantee_email: &str,
+) -> Result<(), AppError> {
+    let text = format!(
+        "This email is to notify you that {grantee_email} has accepted your invitation to become an emergency access contact.\n\nTo confirm this user, log into the web vault ({}), go to settings and confirm the user.\n\nIf you do not wish to confirm this user, you can also remove them on the same page.{FOOTER}",
+        domain(env)
+    );
+    send_email(
+        env,
+        to,
+        &format!("Emergency access contact {grantee_email} accepted"),
+        &text,
+    )
+    .await
+}
+
+pub async fn send_emergency_invite_confirmed(
+    env: &Env,
+    to: &str,
+    grantor_name: &str,
+) -> Result<(), AppError> {
+    let text = format!(
+        "This email is to notify you that you have been confirmed as an emergency access contact for {grantor_name}.\n\nYou can now initiate emergency access requests from the web vault ({}).{FOOTER}",
+        domain(env)
+    );
+    send_email(
+        env,
+        to,
+        &format!("Emergency access contact for {grantor_name} confirmed"),
+        &text,
+    )
+    .await
+}
+
+pub async fn send_emergency_recovery_initiated(
+    env: &Env,
+    to: &str,
+    grantee_name: &str,
+    atype: &str,
+    wait_time_days: i32,
+) -> Result<(), AppError> {
+    let text = format!(
+        "{grantee_name} has initiated an emergency access request to {atype} your account. You may login on the web vault ({}) and manually approve or reject this request.\n\nIf you do nothing, the request will automatically be approved after {wait_time_days} day(s).{FOOTER}",
+        domain(env)
+    );
+    send_email(
+        env,
+        to,
+        &format!("Emergency access request by {grantee_name} initiated"),
+        &text,
+    )
+    .await
+}
+
+pub async fn send_emergency_recovery_reminder(
+    env: &Env,
+    to: &str,
+    grantee_name: &str,
+    atype: &str,
+) -> Result<(), AppError> {
+    let text = format!(
+        "{grantee_name} has a pending emergency access request to {atype} your account. You may login on the web vault ({}) and manually approve or reject this request.\n\nIf you do nothing, the request will automatically be approved after 1 day(s).{FOOTER}",
+        domain(env)
+    );
+    send_email(
+        env,
+        to,
+        &format!("Emergency access request by {grantee_name} is pending"),
+        &text,
+    )
+    .await
+}
+
+pub async fn send_emergency_recovery_approved(
+    env: &Env,
+    to: &str,
+    grantor_name: &str,
+) -> Result<(), AppError> {
+    let text = format!(
+        "{grantor_name} has approved your emergency access request. You may now login on the web vault ({}) and access their account.{FOOTER}",
+        domain(env)
+    );
+    send_email(
+        env,
+        to,
+        &format!("Emergency access request for {grantor_name} approved"),
+        &text,
+    )
+    .await
+}
+
+pub async fn send_emergency_recovery_rejected(
+    env: &Env,
+    to: &str,
+    grantor_name: &str,
+) -> Result<(), AppError> {
+    let text = format!("{grantor_name} has rejected your emergency access request.{FOOTER}");
+    send_email(
+        env,
+        to,
+        &format!("Emergency access request to {grantor_name} rejected"),
+        &text,
+    )
+    .await
+}
+
+pub async fn send_emergency_recovery_timed_out(
+    env: &Env,
+    to: &str,
+    grantee_name: &str,
+    atype: &str,
+) -> Result<(), AppError> {
+    let text = format!(
+        "{grantee_name} has been granted emergency access to {atype} your account. You may login on the web vault ({}) and manually revoke this request.{FOOTER}",
+        domain(env)
+    );
+    send_email(
+        env,
+        to,
+        &format!("Emergency access request by {grantee_name} granted"),
+        &text,
+    )
+    .await
+}

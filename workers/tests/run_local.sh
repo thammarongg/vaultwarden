@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Resets the local D1 database, applies sql/schema.sql, starts `wrangler dev --local`, runs
-# tests/smoke.py and tests/smoke_orgs.py, then restarts it with mail enabled (mock API) for
+# tests/smoke.py, tests/smoke_orgs.py and tests/smoke_emergency.py, then restarts it with mail enabled (mock API) for
 # tests/smoke_mail.py. Local state only: never touches remote resources.
 #
 # Env: PORT (default 8787), WRANGLER_VERSION (default latest), SKIP_BUILD=1 to reuse build/.
@@ -80,6 +80,7 @@ STATUS=0
 start_server "${LOG}"
 SMOKE_BASE_URL="${BASE_URL}" python3 -I tests/smoke.py || STATUS=$?
 [ "${STATUS}" -eq 0 ] && { SMOKE_BASE_URL="${BASE_URL}" python3 -I tests/smoke_orgs.py || STATUS=$?; }
+[ "${STATUS}" -eq 0 ] && { SMOKE_BASE_URL="${BASE_URL}" python3 -I tests/smoke_emergency.py || STATUS=$?; }
 
 # Handlers swallow nothing here, but the cron purge only reports failures in the log.
 if grep -E 'Purge .* failed' "${LOG}" >&2; then

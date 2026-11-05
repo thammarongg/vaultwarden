@@ -335,12 +335,14 @@ pub async fn register(
     // Without mail there is no invite link to accept, so registration accepts the invites;
     // with mail the client follows the link and calls /accept with the token.
     if invited_user_id.is_some() && !crate::mail::mail_enabled(&env) {
-        db.batch(crate::handlers::organizations::accept_invitations_stmts(
+        let mut stmts =
+            crate::handlers::organizations::accept_invitations_stmts(&db, &user.id, &user.email)?;
+        stmts.push(crate::handlers::emergency_access::accept_on_register_stmt(
             &db,
             &user.id,
             &user.email,
-        )?)
-        .await?;
+        )?);
+        db.batch(stmts).await?;
     }
 
     Ok(Json(json!({})))

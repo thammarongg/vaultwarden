@@ -109,4 +109,8 @@ pub async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) 
         "expired auth requests",
         handlers::purge::purge_expired_auth_requests(&env).await,
     );
+    match handlers::emergency_access::scheduled_jobs(&env).await {
+        Ok(n) => log::info!("Emergency access timeouts: {n} approved"),
+        Err(e) => log::error!("Emergency access job failed: {e}"),
+    }
 }

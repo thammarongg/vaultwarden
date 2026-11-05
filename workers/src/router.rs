@@ -513,7 +513,7 @@ pub fn api_router(env: Env) -> Router {
         .route("/api/settings/domains", get(domains::get_domains))
         .route("/api/settings/domains", post(domains::post_domains))
         .route("/api/settings/domains", put(domains::put_domains))
-        // Emergency access (stub - returns empty lists, feature not supported)
+        // Emergency access
         .route(
             "/api/emergency-access/trusted",
             get(emergency_access::get_trusted_contacts),
@@ -521,6 +521,61 @@ pub fn api_router(env: Env) -> Router {
         .route(
             "/api/emergency-access/granted",
             get(emergency_access::get_granted_access),
+        )
+        .route(
+            "/api/emergency-access/invite",
+            post(emergency_access::send_invite),
+        )
+        .route(
+            "/api/emergency-access/{id}",
+            get(emergency_access::get_emergency_access)
+                .put(emergency_access::update_emergency_access)
+                .post(emergency_access::update_emergency_access)
+                .delete(emergency_access::delete_emergency_access),
+        )
+        .route(
+            "/api/emergency-access/{id}/delete",
+            post(emergency_access::delete_emergency_access),
+        )
+        .route(
+            "/api/emergency-access/{id}/reinvite",
+            post(emergency_access::resend_invite),
+        )
+        .route(
+            "/api/emergency-access/{id}/accept",
+            post(emergency_access::accept_invite),
+        )
+        .route(
+            "/api/emergency-access/{id}/confirm",
+            post(emergency_access::confirm_emergency_access),
+        )
+        .route(
+            "/api/emergency-access/{id}/initiate",
+            post(emergency_access::initiate_emergency_access),
+        )
+        .route(
+            "/api/emergency-access/{id}/approve",
+            post(emergency_access::approve_emergency_access),
+        )
+        .route(
+            "/api/emergency-access/{id}/reject",
+            post(emergency_access::reject_emergency_access),
+        )
+        .route(
+            "/api/emergency-access/{id}/view",
+            post(emergency_access::view_emergency_access),
+        )
+        .route(
+            "/api/emergency-access/{id}/takeover",
+            post(emergency_access::takeover_emergency_access),
+        )
+        .route(
+            "/api/emergency-access/{id}/password",
+            post(emergency_access::password_emergency_access),
+        )
+        .route(
+            "/api/emergency-access/{id}/policies",
+            get(emergency_access::policies_emergency_access),
         )
         // Devices (stub - device tracking not implemented, JWT-based auth)
         .route("/api/devices", get(devices::get_devices))

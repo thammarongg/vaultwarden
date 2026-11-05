@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""End-to-end test for mail-enabled organization flows (invites by email, accept with token,
-account recovery), against a server started with RESEND_API_KEY + MAIL_API_URL pointing at the
+"""End-to-end test for mail-enabled flows (org invites by email, accept with token, account
+recovery, emergency access notices), against a server started with RESEND_API_KEY + MAIL_API_URL pointing at the
 mock mail API this script runs on 127.0.0.1:$MAIL_MOCK_PORT (tests/run_local.sh does that).
 Never talks to Resend.
 """
@@ -162,6 +162,54 @@ def test_recovery(owner, org_id, eve, mid):
     check(sync(zed)["policies"] == [], "accepted member: no confirmed policies yet")
 
 
+def emergency_link(email):
+    found = mails_to(email, "Emergency access for ")
+    check(found, f"emergency invite email to {email}")
+    url = next(w for w in found[-1]["text"].split() if "/#/accept-emergency/?" in w)
+    q = urllib.parse.parse_qs(url.split("?", 1)[1])
+    for key in ("id", "name", "email", "token"):
+        check(key in q, f"emergency link has {key}")
+    return {k: v[0] for k, v in q.items()}
+
+
+def test_emergency():
+    section("mail: emergency access invite / accept with token / recovery notices")
+    grantor = User("mail-ea-grantor")
+    grantee = User("mail-ea-grantee")
+    other = User("mail-ea-other")
+    body = {"email": grantee.email, "type": 1, "waitTimeDays": 3}
+    grantor.api("POST", "/api/emergency-access/invite", body=body)
+    contacts = grantor.api("GET", "/api/emergency-access/trusted").json["data"]
+    eq([(c["email"], c["status"]) for c in contacts], [(grantee.email, 0)], "invited, waiting for the link")
+    link = emergency_link(grantee.email)
+    eid = link["id"]
+    eq((link["email"], link["name"]), (grantee.email, "Smoke User"), "link fields")
+    other.api("POST", f"/api/emergency-access/{eid}/accept", body={"token": link["token"]}, expect=400)
+    grantee.api("POST", f"/api/emergency-access/{eid}/accept", body={"token": "bad"}, expect=400)
+    grantor.api("POST", f"/api/emergency-access/{eid}/reinvite")
+    eq(len(mails_to(grantee.email, "Emergency access for ")), 2, "reinvite mails again")
+    grantee.api("POST", f"/api/emergency-access/{eid}/accept", body={"token": link["token"]})
+    check(mails_to(grantor.email, f"Emergency access contact {grantee.email} accepted"), "accepted notice")
+    grantee.api("POST", f"/api/emergency-access/{eid}/accept", body={"token": link["token"]}, expect=400)
+    grantor.api("POST", f"/api/emergency-access/{eid}/confirm", body={"key": "4.k"})
+    check(mails_to(grantee.email, "confirmed"), "confirmed notice")
+    grantee.api("POST", f"/api/emergency-access/{eid}/initiate")
+    m = mails_to(grantor.email, "initiated")
+    check(m and "after 3 day(s)" in m[-1]["text"] and "Takeover" in m[-1]["text"], "initiated notice")
+    grantor.api("POST", f"/api/emergency-access/{eid}/reject")
+    check(mails_to(grantee.email, "rejected"), "rejected notice")
+    grantee.api("POST", f"/api/emergency-access/{eid}/initiate")
+    grantor.api("POST", f"/api/emergency-access/{eid}/approve")
+    check(mails_to(grantee.email, "approved"), "approved notice")
+
+    # A failed invite mail leaves no invite behind.
+    FAIL_FOR.add(other.email)
+    grantor.api("POST", "/api/emergency-access/invite", body=body | {"email": other.email}, expect=400)
+    FAIL_FOR.discard(other.email)
+    emails = [c["email"] for c in grantor.api("GET", "/api/emergency-access/trusted").json["data"]]
+    eq(emails, [grantee.email], "failed invite rolled back")
+
+
 def main():
     server = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), MailMock)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -169,6 +217,7 @@ def main():
     try:
         owner, org_id, eve, mid = test_invites()
         test_recovery(owner, org_id, eve, mid)
+        test_emergency()
     except Failure as e:
         print(f"FAIL: {e}", file=sys.stderr)
         return 1
