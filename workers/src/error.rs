@@ -83,33 +83,45 @@ impl IntoResponse for AppError {
                 (StatusCode::BAD_REQUEST, Json(json_body)).into_response()
             }
             other => {
-                let (status, error_message) = match other {
-                    AppError::Worker(e) => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Worker error: {}", e),
-                    ),
-                    AppError::Database => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Database error".to_string(),
-                    ),
-                    AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-                    AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
-                    AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg),
-                    AppError::TooManyRequests(msg) => (StatusCode::TOO_MANY_REQUESTS, msg),
-                    AppError::Crypto(msg) => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Crypto error: {}", msg),
-                    ),
-                    AppError::Internal => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Internal server error".to_string(),
-                    ),
-                    AppError::TwoFactorRequired(_) | AppError::ApiJson { .. } => unreachable!(),
-                };
-
-                let body = Json(json!({ "error": error_message }));
-                (status, body).into_response()
+                let status = other.status();
+                if status.is_server_error() {
+                    // Full detail (D1/worker/crypto messages) stays in the log only (vaultwarden #7777).
+                    log::error!("{status}: {other}");
+                }
+                (status, Json(json!({ "error": other.client_message() }))).into_response()
             }
+        }
+    }
+}
+
+impl AppError {
+    fn status(&self) -> StatusCode {
+        match self {
+            AppError::NotFound(_) => StatusCode::NOT_FOUND,
+            AppError::BadRequest(_) | AppError::TwoFactorRequired(_) => StatusCode::BAD_REQUEST,
+            AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            AppError::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
+            AppError::ApiJson { status, .. } => *status,
+            AppError::Worker(_) | AppError::Database | AppError::Crypto(_) | AppError::Internal => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        }
+    }
+
+    /// Message safe to show a client: user-facing errors keep their text, internal ones are
+    /// generic so database/runtime details never leave the server.
+    pub fn client_message(&self) -> String {
+        match self {
+            AppError::NotFound(msg)
+            | AppError::BadRequest(msg)
+            | AppError::Unauthorized(msg)
+            | AppError::TooManyRequests(msg) => msg.clone(),
+            AppError::Database => "Database error".to_string(),
+            AppError::Worker(_) | AppError::Crypto(_) | AppError::Internal => {
+                "Internal server error".to_string()
+            }
+            AppError::TwoFactorRequired(_) => "Two factor authentication required".to_string(),
+            AppError::ApiJson { .. } => "API error".to_string(),
         }
     }
 }
@@ -137,6 +149,14 @@ mod tests {
                 "send_access_error_type": expected_type,
             })
         );
+    }
+
+    #[test]
+    fn internal_errors_are_generic_for_clients() {
+        let e = AppError::Crypto("secret detail".into());
+        assert_eq!(e.client_message(), "Internal server error");
+        assert_eq!(e.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(AppError::BadRequest("x".into()).client_message(), "x");
     }
 
     #[test]

@@ -1972,7 +1972,13 @@ fn bulk_result(results: Vec<(String, Result<(), AppError>)>) -> Json<Value> {
             json!({
                 "object": "OrganizationBulkConfirmResponseModel",
                 "id": id,
-                "error": r.err().map(|e| e.to_string()).unwrap_or_default(),
+                "error": r
+                    .err()
+                    .map(|e| {
+                        log::warn!("bulk member operation on {id} failed: {e}");
+                        e.client_message()
+                    })
+                    .unwrap_or_default(),
             })
         })
         .collect();
