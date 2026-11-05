@@ -13,6 +13,7 @@ sys.path.insert(0, __import__("os").path.dirname(__file__))
 
 from smoke import (  # noqa: E402
     PUBLIC_KEY,
+    text_send,
     RUN,
     Failure,
     User,
@@ -324,6 +325,193 @@ def test_invite_new_email(owner, org_id, col_a, cid_a):
         check("401" in str(e), f"removed invitee refused: {e}")
 
 
+def join(owner, org_id, label, *, atype=2, collections=()):
+    """Create a user, invite and confirm them. Returns (user, member_id)."""
+    u = User(label)
+    owner.api("POST", f"/api/organizations/{org_id}/users/invite", body={
+        "emails": [u.email], "type": atype, "groups": [], "permissions": {},
+        "collections": [dict(c) for c in collections]})
+    mid = members(owner, org_id)[u.email]["id"]
+    owner.api("POST", f"/api/organizations/{org_id}/users/{mid}/confirm", body={"key": f"4.key-{label}"})
+    return u, mid
+
+
+def rw(col, manage=False):
+    return {"id": col, "readOnly": False, "hidePasswords": False, "manage": manage}
+
+
+def test_groups(owner, org_id, col_a, col_b, cid_a, cid_b):
+    section("groups: CRUD, membership, group-derived access")
+    gina, gmid = join(owner, org_id, "org-gina")
+    eq(sync_org_view(gina)[2], {}, "no collections: no ciphers")
+    g = owner.api("POST", f"/api/organizations/{org_id}/groups", body={
+        "name": "Readers", "accessAll": False, "externalId": None,
+        "collections": [{"id": col_a, "readOnly": True, "hidePasswords": False, "manage": False}],
+        "users": [gmid]}).json
+    eq((g["object"], g["name"], g["organizationId"]), ("group", "Readers", org_id), "group create")
+    gid = g["id"]
+    _, cols, ciphers = sync_org_view(gina)
+    eq(list(cols), [col_a], "group collection in sync")
+    eq((ciphers[cid_a]["edit"], cols[col_a]["readOnly"]), (False, True), "group read-only access")
+    eq(owner.api("GET", f"/api/organizations/{org_id}/groups/{gid}/users").json, [gmid], "group members")
+    d = owner.api("GET", f"/api/organizations/{org_id}/groups/{gid}/details").json
+    eq((d["object"], [c["id"] for c in d["collections"]]), ("groupDetails", [col_a]), "group details")
+    eq([x["id"] for x in owner.api("GET", f"/api/organizations/{org_id}/groups").json["data"]], [gid], "group list")
+    eq(len(owner.api("GET", f"/api/organizations/{org_id}/groups/details").json["data"]), 1, "group list details")
+    m = owner.api("GET", f"/api/organizations/{org_id}/users/{gmid}?includeGroups=true").json
+    eq(m["groups"], [gid], "member lists its group")
+    gina.api("GET", f"/api/organizations/{org_id}/groups", expect=DENIED)
+    owner.api("POST", f"/api/organizations/{org_id}/groups", body={
+        "name": "bad", "collections": [rw(str(uuid.uuid4()))], "users": []}, expect=400)
+
+    # A direct user grant overrides the group's flags for that collection.
+    owner.api("PUT", f"/api/organizations/{org_id}/users/{gmid}", body={
+        "type": 2, "collections": [rw(col_a)], "groups": [gid], "permissions": {}})
+    eq(sync_org_view(gina)[2][cid_a]["edit"], True, "user grant overrides group read-only")
+    owner.api("PUT", f"/api/organizations/{org_id}/users/{gmid}", body={
+        "type": 2, "collections": [], "groups": [gid], "permissions": {}})
+
+    # accessAll group: every org cipher, full rights.
+    owner.api("PUT", f"/api/organizations/{org_id}/groups/{gid}", body={
+        "name": "Everyone", "accessAll": True, "collections": [], "users": [gmid]})
+    ciphers = sync_org_view(gina)[2]
+    check(cid_a in ciphers and cid_b in ciphers, "accessAll group sees all org ciphers")
+    eq(ciphers[cid_b]["edit"], True, "accessAll group can edit")
+    gina.api("PUT", f"/api/ciphers/{cid_b}", body=login_payload("gina-edit", organizationId=org_id))
+
+    # Collection access via bulk-access (users + groups replaced on each collection).
+    owner.api("PUT", f"/api/organizations/{org_id}/groups/{gid}", body={
+        "name": "Everyone", "accessAll": False, "collections": [], "users": [gmid]})
+    eq(sync_org_view(gina)[2], {}, "group without access: nothing")
+    owner.api("POST", f"/api/organizations/{org_id}/collections/bulk-access", body={
+        "collectionIds": [col_b], "users": [], "groups": [{"id": gid, "readOnly": False, "hidePasswords": True, "manage": False}]})
+    ciphers = sync_org_view(gina)[2]
+    eq((cid_b in ciphers, ciphers[cid_b]["viewPassword"]), (True, False), "bulk-access group grant")
+    det = {c["id"]: c for c in owner.api("GET", f"/api/organizations/{org_id}/collections/details").json["data"]}
+    eq([x["id"] for x in det[col_b]["groups"]], [gid], "collection details list the group")
+
+    owner.api("DELETE", f"/api/organizations/{org_id}/groups/{gid}")
+    eq(sync_org_view(gina)[2], {}, "deleting the group removes its access")
+    owner.api("GET", f"/api/organizations/{org_id}/groups/{gid}", expect=400)
+    g2 = owner.api("POST", f"/api/organizations/{org_id}/groups", body={"name": "tmp", "collections": [], "users": []}).json
+    owner.api("DELETE", f"/api/organizations/{org_id}/groups", body={"ids": [g2["id"]]})
+    eq(owner.api("GET", f"/api/organizations/{org_id}/groups").json["data"], [], "bulk delete groups")
+    return gina, gmid
+
+
+def put_policy(owner, org_id, ptype, enabled, data=None):
+    return owner.api("PUT", f"/api/organizations/{org_id}/policies/{ptype}",
+                     body={"policy": {"enabled": enabled, "data": data}}).json
+
+
+def test_policies(owner, org_id, col_a):
+    section("policies: list/get/put and enforcement")
+    pat, pmid = join(owner, org_id, "org-pat", collections=[rw(col_a)])
+    eq(owner.api("GET", f"/api/organizations/{org_id}/policies").json["data"], [], "no policies yet")
+    eq(owner.api("GET", f"/api/organizations/{org_id}/policies/5").json["enabled"], False, "default policy")
+    owner.api("GET", f"/api/organizations/{org_id}/policies/4", expect=400)
+    pat.api("GET", f"/api/organizations/{org_id}/policies", expect=DENIED)
+
+    # Personal ownership: members can't save personal items; org items and admins are fine.
+    p = put_policy(owner, org_id, 5, True)
+    eq((p["type"], p["enabled"], p["object"]), (5, True, "policy"), "personal ownership on")
+    pat.api("POST", "/api/ciphers", body=login_payload("pat-personal"), expect=400)
+    pat.api("POST", "/api/ciphers/import", body={"ciphers": [login_payload("imp")], "folders": [], "folderRelationships": []}, expect=400)
+    pat.api("POST", "/api/ciphers/create", body={"cipher": login_payload("pat-org", organizationId=org_id), "collectionIds": [col_a]})
+    owner.api("POST", "/api/ciphers", body=login_payload("owner-personal"))
+    s = sync(pat)
+    eq([(x["type"], x["enabled"]) for x in s["policies"]], [(5, True)], "sync policies")
+    eq(len(s["policiesNew"]), 1, "sync policiesNew")
+    put_policy(owner, org_id, 5, False)
+    pat.api("POST", "/api/ciphers", body=login_payload("pat-personal"))
+
+    # Disable Send and Send options.
+    put_policy(owner, org_id, 6, True)
+    pat.api("POST", "/api/sends", body=text_send(), expect=400)
+    put_policy(owner, org_id, 6, False)
+    put_policy(owner, org_id, 7, True, {"disableHideEmail": True})
+    pat.api("POST", "/api/sends", body=text_send(hideEmail=True), expect=400)
+    pat.api("POST", "/api/sends", body=text_send(hideEmail=False))
+    put_policy(owner, org_id, 7, False, {"disableHideEmail": True})
+
+    # Master password policy reaches the login response.
+    put_policy(owner, org_id, 1, True, {"minComplexity": 2, "minLength": 14, "requireUpper": True,
+                                        "requireLower": False, "requireNumbers": False,
+                                        "requireSpecial": False, "enforceOnLogin": False})
+    mpp = pat.relogin()["MasterPasswordPolicy"]
+    eq((mpp["MinLength"], mpp["RequireUpper"], mpp["Object"]), (14, True, "masterPasswordPolicy"), "login policy")
+    eq(pat.api("GET", f"/api/organizations/{org_id}/policies/master-password").json["data"]["minLength"], 14,
+       "member reads master-password policy")
+    put_policy(owner, org_id, 1, False)
+
+    # 2FA required: members without 2FA are revoked and can't be restored.
+    put_policy(owner, org_id, 0, True)
+    eq(members(owner, org_id)[pat.email]["status"], -1, "2FA policy revokes member without 2FA")
+    eq(members(owner, org_id)[owner.email]["status"], 2, "owner exempt from 2FA policy")
+    owner.api("PUT", f"/api/organizations/{org_id}/users/{pmid}/restore", expect=400)
+    put_policy(owner, org_id, 0, False)
+    owner.api("PUT", f"/api/organizations/{org_id}/users/{pmid}/restore")
+    eq(members(owner, org_id)[pat.email]["status"], 2, "restored after policy off")
+
+    # Single organization: members in another org are revoked.
+    other = pat.api("POST", "/api/organizations", body=org_payload("Pat Org")).json["id"]
+    put_policy(owner, org_id, 3, True)
+    eq(members(owner, org_id)[pat.email]["status"], -1, "single-org revokes multi-org member")
+    owner.api("PUT", f"/api/organizations/{org_id}/users/{pmid}/restore", expect=400)
+    pat.api("DELETE", f"/api/organizations/{other}", body=pat.auth)
+    owner.api("PUT", f"/api/organizations/{org_id}/users/{pmid}/restore")
+    pat.api("POST", "/api/organizations", body=org_payload("Pat Org 2"), expect=400)  # single-org blocks new orgs
+    put_policy(owner, org_id, 3, False)
+    types = sorted(p["type"] for p in owner.api("GET", f"/api/organizations/{org_id}/policies").json["data"])
+    eq(types, [0, 1, 3, 5, 6, 7], "stored policies")
+    return pat
+
+
+def test_bulk_export_import(owner, org_id, col_a, col_b):
+    section("org: bulk collections, export, import, api key, events, no-mail guards")
+    c1 = owner.api("POST", "/api/ciphers/create", body={
+        "cipher": login_payload("bulk-1", organizationId=org_id), "collectionIds": [col_a]}).json["id"]
+    owner.api("POST", "/api/ciphers/bulk-collections", body={
+        "organizationId": org_id, "cipherIds": [c1], "collectionIds": [col_b], "removeCollections": False})
+    eq(sorted(owner.api("GET", f"/api/ciphers/{c1}").json["collectionIds"]), sorted([col_a, col_b]), "bulk add")
+    owner.api("POST", "/api/ciphers/bulk-collections", body={
+        "organizationId": org_id, "cipherIds": [c1], "collectionIds": [col_a], "removeCollections": True})
+    eq(owner.api("GET", f"/api/ciphers/{c1}").json["collectionIds"], [col_b], "bulk remove")
+
+    before = len(owner.api("GET", f"/api/ciphers/organization-details?organizationId={org_id}").json["data"])
+    owner.api("POST", f"/api/ciphers/import-organization?organizationId={org_id}", body={
+        "ciphers": [login_payload("imp-1", organizationId=org_id), login_payload("imp-2", organizationId=org_id)],
+        "collections": [{"name": "2.imported|iv|mac", "id": None, "externalId": None}, {"name": "x", "id": col_a}],
+        "collectionRelationships": [{"key": 0, "value": 0}, {"key": 1, "value": 1}]})
+    details = owner.api("GET", f"/api/ciphers/organization-details?organizationId={org_id}").json["data"]
+    eq(len(details), before + 2, "import-organization adds ciphers")
+    imported = [c for c in details if c["name"] in ("2.name-imp-1|iv|mac", "2.name-imp-2|iv|mac")]
+    eq(sorted(len(c["collectionIds"]) for c in imported), [1, 1], "import relations")
+    names = [c["name"] for c in owner.api("GET", f"/api/organizations/{org_id}/collections").json["data"]]
+    check("2.imported|iv|mac" in names, "import created the new collection")
+
+    exp = owner.api("GET", f"/api/organizations/{org_id}/export").json
+    eq((len(exp["ciphers"]), len(exp["collections"])), (len(details), len(names)), "org export")
+
+    k1 = owner.api("POST", f"/api/organizations/{org_id}/api-key", body=owner.auth).json
+    eq((k1["object"], len(k1["apiKey"])), ("apiKey", 30), "org api key")
+    eq(owner.api("POST", f"/api/organizations/{org_id}/api-key", body=owner.auth).json["apiKey"], k1["apiKey"], "api key stable")
+    k2 = owner.api("POST", f"/api/organizations/{org_id}/rotate-api-key", body=owner.auth).json
+    check(k2["apiKey"] != k1["apiKey"] and len(k2["apiKey"]) == 30, "api key rotated")
+    owner.api("POST", f"/api/organizations/{org_id}/api-key", body={"masterPasswordHash": "x"}, expect=401)
+
+    for path in (f"/api/organizations/{org_id}/events", f"/api/ciphers/{c1}/events"):
+        eq(owner.api("GET", path).json["data"], [], f"events {path}")
+
+    # Without mail: invite links, recovery and enrollment are unavailable (vaultwarden behavior).
+    me = members(owner, org_id)[owner.email]
+    owner.api("POST", f"/api/organizations/{org_id}/users/{me['id']}/accept", body={"token": "bogus"}, expect=400)
+    call("GET", f"/api/organizations/{org_id}/policies/token?token=bogus", expect=400)
+    owner.api("PUT", f"/api/organizations/{org_id}/users/{me['userId']}/reset-password-enrollment",
+              body={"resetPasswordKey": "k", "masterPasswordHash": owner.password}, expect=400)
+    check(not sync_org_view(owner)[0][org_id]["useResetPassword"], "useResetPassword off without mail")
+
+
 def test_delete(owner, org_id, col_b):
     section("organizations: delete collection / account guard / delete org")
     personal = owner.api("POST", "/api/ciphers", body=login_payload("keep-me")).json["id"]
@@ -332,8 +520,9 @@ def test_delete(owner, org_id, col_b):
     ciphers = sync_org_view(owner)[2]
     eq([c["id"] for c in ciphers.values() if c["organizationId"]], [], "org purge removed org ciphers")
     check(personal in ciphers, "org purge kept personal ciphers")
+    n = len(owner.api("GET", f"/api/organizations/{org_id}/collections").json["data"])
     owner.api("DELETE", f"/api/organizations/{org_id}/collections/{col_b}")
-    eq(len(owner.api("GET", f"/api/organizations/{org_id}/collections").json["data"]), 1, "collection deleted")
+    eq(len(owner.api("GET", f"/api/organizations/{org_id}/collections").json["data"]), n - 1, "collection deleted")
     owner.api("DELETE", "/api/accounts", body=owner.auth, expect=400)  # sole owner
     owner.api("DELETE", f"/api/organizations/{org_id}", body={"masterPasswordHash": "wrong"}, expect=DENIED)
     owner.api("DELETE", f"/api/organizations/{org_id}", body=owner.auth)
@@ -352,6 +541,9 @@ def main():
         cid_a, cid_b, _ = test_org_ciphers(owner, org_id, col_a, col_b)
         test_members(owner, org_id, col_a, col_b, cid_a, cid_b)
         test_invite_new_email(owner, org_id, col_a, cid_a)
+        test_groups(owner, org_id, col_a, col_b, cid_a, cid_b)
+        test_policies(owner, org_id, col_a)
+        test_bulk_export_import(owner, org_id, col_a, col_b)
         test_delete(owner, org_id, col_b)
     except Failure as e:
         print(f"FAIL: {e}", file=sys.stderr)

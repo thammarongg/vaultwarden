@@ -332,7 +332,9 @@ pub async fn register(
     .await
     .map_err(|_| AppError::Database)?;
 
-    if invited_user_id.is_some() {
+    // Without mail there is no invite link to accept, so registration accepts the invites;
+    // with mail the client follows the link and calls /accept with the token.
+    if invited_user_id.is_some() && !crate::mail::mail_enabled(&env) {
         db.batch(crate::handlers::organizations::accept_invitations_stmts(
             &db,
             &user.id,
@@ -452,7 +454,7 @@ pub async fn get_profile(
     let two_factor_enabled = two_factor_enabled(&db, &user_id).await?;
     let mut profile = Profile::from_user(user, two_factor_enabled)?;
     profile.organizations =
-        crate::handlers::organizations::profile_organizations(&db, &user_id).await?;
+        crate::handlers::organizations::profile_organizations(&env, &db, &user_id).await?;
 
     Ok(Json(profile))
 }
@@ -501,7 +503,7 @@ pub async fn post_profile(
     let two_factor_enabled = two_factor_enabled(&db, user_id).await?;
     let mut profile = Profile::from_user(user, two_factor_enabled)?;
     profile.organizations =
-        crate::handlers::organizations::profile_organizations(&db, user_id).await?;
+        crate::handlers::organizations::profile_organizations(&env, &db, user_id).await?;
 
     notifications::publish_user_update(
         (*env).clone(),
@@ -570,7 +572,7 @@ pub async fn put_avatar(
     let two_factor_enabled = two_factor_enabled(&db, user_id).await?;
     let mut profile = Profile::from_user(user, two_factor_enabled)?;
     profile.organizations =
-        crate::handlers::organizations::profile_organizations(&db, user_id).await?;
+        crate::handlers::organizations::profile_organizations(&env, &db, user_id).await?;
 
     notifications::publish_user_update(
         (*env).clone(),

@@ -7,8 +7,8 @@ use worker::Env;
 
 use crate::handlers::{
     accounts, attachments, auth_requests, ciphers, config, devices, domains, emergency_access,
-    folders, identity, import, meta, org_groups, org_policies, organizations, sends, sync,
-    twofactor, webauth,
+    folders, identity, import, meta, org_admin, org_groups, org_policies, organizations, sends,
+    sync, twofactor, webauth,
 };
 
 pub fn api_router(env: Env) -> Router {
@@ -464,6 +464,40 @@ pub fn api_router(env: Env) -> Router {
             "/api/ciphers/import-organization",
             post(ciphers::import_organization),
         )
+        // Account recovery, API key, events (phase 3.5)
+        .route(
+            "/api/organizations/{org_id}/users/{user_id}/reset-password-enrollment",
+            put(org_admin::put_reset_password_enrollment),
+        )
+        .route(
+            "/api/organizations/{org_id}/users/{member_id}/reset-password-details",
+            get(org_admin::get_reset_password_details),
+        )
+        .route(
+            "/api/organizations/{org_id}/users/{member_id}/recover-account",
+            put(org_admin::recover_account),
+        )
+        .route(
+            "/api/organizations/{org_id}/users/{member_id}/reset-password",
+            put(org_admin::recover_account),
+        )
+        .route(
+            "/api/organizations/{org_id}/api-key",
+            post(org_admin::post_api_key),
+        )
+        .route(
+            "/api/organizations/{org_id}/rotate-api-key",
+            post(org_admin::rotate_api_key),
+        )
+        .route(
+            "/api/organizations/{org_id}/events",
+            get(org_admin::empty_events),
+        )
+        .route(
+            "/api/organizations/{org_id}/users/{member_id}/events",
+            get(org_admin::empty_events),
+        )
+        .route("/api/ciphers/{id}/events", get(org_admin::empty_events))
         .route("/api/plans", get(organizations::get_plans))
         .route("/api/config", get(config::config))
         // Meta endpoints (mirrors a subset of vaultwarden core/mod.rs)

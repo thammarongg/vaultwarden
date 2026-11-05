@@ -315,6 +315,26 @@ pub fn generate_recovery_code() -> Result<String, AppError> {
     Ok(base32_encode(&bytes.to_vec()))
 }
 
+/// Random alphanumeric API key (vaultwarden `generate_api_key`: 30 characters).
+pub fn generate_api_key() -> Result<String, AppError> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let crypto = get_crypto()?;
+    let mut out = String::with_capacity(30);
+    while out.len() < 30 {
+        let bytes = Uint8Array::new_with_length(64);
+        crypto
+            .get_random_values_with_array_buffer_view(&bytes)
+            .map_err(|e| AppError::Crypto(format!("Failed to generate API key: {:?}", e)))?;
+        // Rejection sampling keeps the distribution uniform (248 = 4 * 62).
+        for b in bytes.to_vec() {
+            if b < 248 && out.len() < 30 {
+                out.push(ALPHABET[(b % 62) as usize] as char);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Constant-time string comparison wrapper.
 pub fn ct_eq(a: &str, b: &str) -> bool {
     constant_time_eq(a.as_bytes(), b.as_bytes())

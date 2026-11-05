@@ -90,7 +90,7 @@ pub async fn get_sync_data(
     // Serialize profile and folders (small data, acceptable CPU cost)
     let mut profile = Profile::from_user(user, two_factor_enabled)?;
     profile.organizations =
-        crate::handlers::organizations::profile_organizations(&db, &user_id).await?;
+        crate::handlers::organizations::profile_organizations(&env, &db, &user_id).await?;
     let collections_json =
         crate::handlers::organizations::sync_collections_json(&db, &user_id).await?;
     let (policies_json, policies_new_json) =

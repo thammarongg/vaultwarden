@@ -196,6 +196,46 @@ pub async fn enforce_send_policies(
     Ok(())
 }
 
+/// vaultwarden `org_is_reset_password_auto_enroll` (needs mail, like upstream).
+pub async fn reset_password_auto_enroll(
+    env: &Env,
+    db: &db::Db,
+    org_id: &str,
+) -> Result<bool, AppError> {
+    if !crate::mail::mail_enabled(env) {
+        return Ok(false);
+    }
+    Ok(find_policy(db, org_id, policy_type::RESET_PASSWORD)
+        .await?
+        .is_some_and(|p| {
+            p.enabled != 0
+                && serde_json::from_str::<Value>(&p.data)
+                    .ok()
+                    .and_then(|d| d.get("autoEnrollEnabled").and_then(Value::as_bool))
+                    .unwrap_or(false)
+        }))
+}
+
+/// vaultwarden `check_reset_password_applicable`.
+pub async fn check_reset_password_applicable(
+    env: &Env,
+    db: &db::Db,
+    org_id: &str,
+) -> Result<(), AppError> {
+    if !crate::mail::mail_enabled(env) {
+        return Err(AppError::BadRequest(
+            "Password reset is not supported on an email-disabled instance.".to_string(),
+        ));
+    }
+    match find_policy(db, org_id, policy_type::RESET_PASSWORD).await? {
+        None => Err(AppError::BadRequest("Policy not found".to_string())),
+        Some(p) if p.enabled == 0 => Err(AppError::BadRequest(
+            "Reset password policy not enabled".to_string(),
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
 async fn user_has_2fa(db: &db::Db, user_id: &str) -> Result<bool, AppError> {
     let row: Option<Value> = db
         .prepare("SELECT 1 AS ok FROM twofactor WHERE user_uuid = ?1 AND atype < 1000 AND enabled = 1 LIMIT 1")
@@ -365,10 +405,36 @@ pub async fn list_policies(
     ))
 }
 
-/// GET /api/organizations/{org_id}/policies/token?token= (invite-link flow; needs mail)
-pub async fn list_policies_token() -> Result<Json<Value>, AppError> {
-    Err(AppError::BadRequest(
-        "Invitation links are not enabled on this server".to_string(),
+#[derive(Deserialize)]
+pub struct TokenQuery {
+    token: String,
+}
+
+/// GET /api/organizations/{org_id}/policies/token?token= (invite-link flow, no login yet)
+#[worker::send]
+pub async fn list_policies_token(
+    State(env): State<Arc<Env>>,
+    Path(org_id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<TokenQuery>,
+) -> Result<Json<Value>, AppError> {
+    let invite = crate::handlers::organizations::decode_invite(&env, &q.token)?;
+    if invite.org_id != org_id {
+        return Err(AppError::BadRequest(
+            "Token doesn't match request organization".to_string(),
+        ));
+    }
+    let db = db::get_db(&env)?;
+    let rows: Vec<PolicyRow> = db
+        .prepare(format!(
+            "SELECT {POLICY_COLS} FROM org_policies WHERE org_uuid = ?1"
+        ))
+        .bind(&[org_id.into()])?
+        .all()
+        .await?
+        .results()?;
+    let data: Vec<Value> = rows.iter().map(policy_json).collect();
+    Ok(Json(
+        json!({"data": data, "object": "list", "continuationToken": null}),
     ))
 }
 

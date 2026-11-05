@@ -10,6 +10,7 @@ pub mod folders;
 pub mod identity;
 pub mod import;
 pub mod meta;
+pub mod org_admin;
 pub mod org_groups;
 pub mod org_policies;
 pub mod organizations;

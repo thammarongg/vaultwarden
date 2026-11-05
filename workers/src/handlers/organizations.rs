@@ -123,7 +123,8 @@ pub async fn require_role(
     Ok(m)
 }
 
-pub fn org_json(org: &OrgRow) -> Value {
+/// Organization JSON; `use_reset_password` mirrors vaultwarden (`CONFIG.mail_enabled()`).
+pub fn org_json_with(org: &OrgRow, use_reset_password: bool) -> Value {
     json!({
         "id": org.uuid,
         "name": org.name,
@@ -151,7 +152,7 @@ pub fn org_json(org: &OrgRow) -> Value {
         "usePam": false,
         "usePhishingBlocker": false,
         "hasPublicAndPrivateKeys": org.private_key.is_some() && org.public_key.is_some(),
-        "useResetPassword": false,
+        "useResetPassword": use_reset_password,
         "allowAdminAccessToAllCollectionItems": true,
         "limitCollectionCreation": true,
         "limitCollectionDeletion": true,
@@ -176,7 +177,7 @@ pub fn org_json(org: &OrgRow) -> Value {
 }
 
 /// `profile.organizations[]` entry: vaultwarden `Membership::to_json`.
-fn profile_org_json(m: &MembershipRow, org: &OrgRow) -> Value {
+fn profile_org_json(m: &MembershipRow, org: &OrgRow, use_reset_password: bool) -> Value {
     let t = type_for_client(m.atype);
     json!({
         "id": m.org_uuid,
@@ -196,7 +197,7 @@ fn profile_org_json(m: &MembershipRow, org: &OrgRow) -> Value {
         "selfHost": true,
         "hasPublicAndPrivateKeys": org.private_key.is_some() && org.public_key.is_some(),
         "resetPasswordEnrolled": m.reset_password_key.is_some(),
-        "useResetPassword": false,
+        "useResetPassword": use_reset_password,
         "ssoBound": false,
         "useSso": false,
         "useKeyConnector": false,
@@ -265,7 +266,12 @@ struct MembershipOrgRow {
 }
 
 /// All `profile.organizations` entries of a user (every membership, like vaultwarden).
-pub async fn profile_organizations(db: &db::Db, user_id: &str) -> Result<Vec<Value>, AppError> {
+pub async fn profile_organizations(
+    env: &Env,
+    db: &db::Db,
+    user_id: &str,
+) -> Result<Vec<Value>, AppError> {
+    let use_reset_password = crate::mail::mail_enabled(env);
     let rows: Vec<MembershipOrgRow> = db
         .prepare(
             "SELECT uo.uuid, uo.user_uuid, uo.org_uuid, uo.access_all, uo.akey, uo.status, uo.atype,
@@ -288,7 +294,7 @@ pub async fn profile_organizations(db: &db::Db, user_id: &str) -> Result<Vec<Val
                 private_key: r.private_key,
                 public_key: r.public_key,
             };
-            profile_org_json(&r.m, &org)
+            profile_org_json(&r.m, &org, use_reset_password)
         })
         .collect())
 }
@@ -419,6 +425,18 @@ pub async fn create_organization(
     Json(data): Json<OrgCreateData>,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&env)?;
+    if crate::handlers::org_policies::policy_applies_to_user(
+        &db,
+        &claims.sub,
+        crate::handlers::org_policies::policy_type::SINGLE_ORG,
+        None,
+    )
+    .await?
+    {
+        return Err(AppError::BadRequest(
+            "You may not create an organization. You belong to an organization which has a policy that prohibits you from being a member of any other organization.".to_string(),
+        ));
+    }
     let org_id = Uuid::new_v4().to_string();
     let member_id = Uuid::new_v4().to_string();
     let col_id = Uuid::new_v4().to_string();
@@ -461,7 +479,7 @@ pub async fn create_organization(
     .await?;
     db::touch_user_updated_at(&db, &claims.sub, &now()).await?;
     let org = find_org(&db, &org_id).await?.ok_or(AppError::Internal)?;
-    Ok(Json(org_json(&org)))
+    Ok(Json(org_json_with(&org, crate::mail::mail_enabled(&env))))
 }
 
 /// GET /api/organizations/{org_id}
@@ -476,7 +494,7 @@ pub async fn get_organization(
     let org = find_org(&db, &org_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Can't find organization details".to_string()))?;
-    Ok(Json(org_json(&org)))
+    Ok(Json(org_json_with(&org, crate::mail::mail_enabled(&env))))
 }
 
 #[derive(Deserialize)]
@@ -508,7 +526,7 @@ pub async fn put_organization(
     .await?;
     touch_org_members(&db, &org_id).await?;
     let org = find_org(&db, &org_id).await?.ok_or(AppError::Internal)?;
-    Ok(Json(org_json(&org)))
+    Ok(Json(org_json_with(&org, crate::mail::mail_enabled(&env))))
 }
 
 #[derive(Deserialize)]
@@ -1453,6 +1471,113 @@ pub async fn org_collection_ids(db: &db::Db, org_id: &str) -> Result<HashSet<Str
 }
 
 // ---------------------------------------------------------------------------
+// Invite tokens (vaultwarden `InviteJwtClaims`, signed with JWT_SECRET, 5 days)
+// ---------------------------------------------------------------------------
+
+const INVITE_ISSUER: &str = "vaultwarden-cf|invite";
+const INVITE_TTL_HOURS: i64 = 120;
+
+#[derive(serde::Serialize, Deserialize, Debug)]
+pub struct InviteClaims {
+    pub iss: String,
+    pub sub: String,
+    pub email: String,
+    pub org_id: String,
+    pub member_id: String,
+    pub invited_by_email: Option<String>,
+}
+
+pub fn encode_invite(env: &Env, claims: InviteClaims) -> Result<String, AppError> {
+    use jwt_compact::AlgorithmExt;
+    let now = chrono::Utc::now();
+    let jwt = jwt_compact::Claims::new(claims)
+        .set_duration_and_issuance(
+            &crate::auth::jwt_time_options(),
+            chrono::Duration::hours(INVITE_TTL_HOURS),
+        )
+        .set_not_before(now);
+    let secret = env.secret("JWT_SECRET")?.to_string();
+    jwt_compact::alg::Hs256
+        .token(
+            &jwt_compact::Header::empty(),
+            &jwt,
+            &jwt_compact::alg::Hs256Key::new(secret.as_bytes()),
+        )
+        .map_err(|_| AppError::Crypto("Failed to create invite token".to_string()))
+}
+
+pub fn decode_invite(env: &Env, token: &str) -> Result<InviteClaims, AppError> {
+    use jwt_compact::AlgorithmExt;
+    let invalid = || AppError::BadRequest("Invalid or expired invitation token".to_string());
+    let secret = env.secret("JWT_SECRET")?.to_string();
+    let untrusted = jwt_compact::UntrustedToken::new(token).map_err(|_| invalid())?;
+    let token = jwt_compact::alg::Hs256
+        .validator::<InviteClaims>(&jwt_compact::alg::Hs256Key::new(secret.as_bytes()))
+        .validate(&untrusted)
+        .map_err(|_| invalid())?;
+    let opts = crate::auth::jwt_time_options();
+    token
+        .claims()
+        .validate_expiration(&opts)
+        .map_err(|_| invalid())?;
+    token
+        .claims()
+        .validate_maturity(&opts)
+        .map_err(|_| invalid())?;
+    let claims = token.into_parts().1.custom;
+    if claims.iss != INVITE_ISSUER {
+        return Err(invalid());
+    }
+    Ok(claims)
+}
+
+/// Email an invitation for membership `member_id` (mail mode only).
+async fn send_member_invite(
+    env: &Env,
+    db: &db::Db,
+    org_id: &str,
+    member_id: &str,
+    user_id: &str,
+    email: &str,
+    invited_by: Option<String>,
+) -> Result<(), AppError> {
+    let org = find_org(db, org_id)
+        .await?
+        .ok_or_else(|| AppError::BadRequest("Error looking up organization".to_string()))?;
+    #[derive(Deserialize)]
+    struct Row {
+        has_keys: i32,
+    }
+    let has_existing_user = db
+        .prepare("SELECT (private_key IS NOT NULL) AS has_keys FROM users WHERE uuid = ?1")
+        .bind(&[user_id.into()])?
+        .first::<Row>(None)
+        .await?
+        .is_some_and(|r| r.has_keys != 0);
+    let token = encode_invite(
+        env,
+        InviteClaims {
+            iss: INVITE_ISSUER.to_string(),
+            sub: user_id.to_string(),
+            email: email.to_string(),
+            org_id: org_id.to_string(),
+            member_id: member_id.to_string(),
+            invited_by_email: invited_by,
+        },
+    )?;
+    crate::mail::send_invite(
+        env,
+        email,
+        org_id,
+        member_id,
+        &org.name,
+        &token,
+        has_existing_user,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
 // Member management (phase 3.2). Mail is not wired yet, so this follows vaultwarden's
 // no-SMTP behavior: existing accounts are Accepted on invite, new emails get an
 // `invitations` row plus a placeholder user that is completed on registration.
@@ -1624,6 +1749,7 @@ pub async fn invite_members(
     let collections = data.collections.unwrap_or_default();
     check_collections_exist(&db, &org_id, &collections).await?;
     let now = now();
+    let mail = crate::mail::mail_enabled(&env);
 
     for raw_email in &data.emails {
         let email = raw_email.trim().to_lowercase();
@@ -1640,7 +1766,10 @@ pub async fn invite_members(
                     )));
                 }
                 if has_password {
-                    status = membership_status::ACCEPTED;
+                    // Without mail the invite can't be accepted from a link: accept it now.
+                    if !mail {
+                        status = membership_status::ACCEPTED;
+                    }
                 } else {
                     stmts.push(
                         d1_query!(
@@ -1704,7 +1833,39 @@ pub async fn invite_members(
             )?);
         }
         stmts.extend(member_groups_stmts(&db, &org_id, &member_id, &data.groups)?);
+        let created_user = stmts.len() > 1 && find_user_id_by_email(&db, &email).await?.is_none();
         db.batch(stmts).await?;
+        if mail {
+            if let Err(e) = send_member_invite(
+                &env,
+                &db,
+                &org_id,
+                &member_id,
+                &user_id,
+                &email,
+                Some(claims.email.clone()),
+            )
+            .await
+            {
+                // vaultwarden: undo the invite (and the placeholder account) when the mail fails.
+                let m = find_member_in_org(&db, &org_id, &member_id).await?;
+                delete_membership(&db, &m).await?;
+                if created_user {
+                    db.batch(vec![
+                        d1_query!(&db, "DELETE FROM invitations WHERE email = ?1", email)
+                            .map_err(|_| AppError::Database)?,
+                        d1_query!(
+                            &db,
+                            "DELETE FROM users WHERE uuid = ?1 AND length(password_hash) = 0",
+                            user_id
+                        )
+                        .map_err(|_| AppError::Database)?,
+                    ])
+                    .await?;
+                }
+                return Err(e);
+            }
+        }
     }
     Ok(Json(json!({})))
 }
@@ -1746,12 +1907,41 @@ async fn confirmed_owner_count(db: &db::Db, org_id: &str) -> Result<i64, AppErro
 
 /// Re-sending invitations needs mail; without it, accounts that registered since the
 /// invite are moved to Accepted (vaultwarden `_reinvite_member` without SMTP).
-async fn reinvite_impl(db: &db::Db, org_id: &str, member_id: &str) -> Result<(), AppError> {
+async fn reinvite_impl(
+    env: &Env,
+    db: &db::Db,
+    org_id: &str,
+    member_id: &str,
+    invited_by: &str,
+) -> Result<(), AppError> {
     let m = find_member_in_org(db, org_id, member_id).await?;
     if m.status != membership_status::INVITED {
         return Err(AppError::BadRequest(
             "The user is already accepted or confirmed to the organization".to_string(),
         ));
+    }
+    if crate::mail::mail_enabled(env) {
+        #[derive(Deserialize)]
+        struct Email {
+            email: String,
+        }
+        let email = db
+            .prepare("SELECT email FROM users WHERE uuid = ?1")
+            .bind(&[m.user_uuid.clone().into()])?
+            .first::<Email>(None)
+            .await?
+            .ok_or_else(|| AppError::BadRequest("User not found".to_string()))?
+            .email;
+        return send_member_invite(
+            env,
+            db,
+            org_id,
+            &m.uuid,
+            &m.user_uuid,
+            &email,
+            Some(invited_by.to_string()),
+        )
+        .await;
     }
     #[derive(Deserialize)]
     struct Row {
@@ -1798,7 +1988,7 @@ pub async fn reinvite_member(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&env)?;
     require_role(&db, &claims.sub, &org_id, membership_type::ADMIN).await?;
-    reinvite_impl(&db, &org_id, &member_id).await?;
+    reinvite_impl(&env, &db, &org_id, &member_id, &claims.email).await?;
     Ok(Json(json!({})))
 }
 
@@ -1814,18 +2004,99 @@ pub async fn bulk_reinvite_members(
     require_role(&db, &claims.sub, &org_id, membership_type::ADMIN).await?;
     let mut out = Vec::new();
     for id in data.ids {
-        let r = reinvite_impl(&db, &org_id, &id).await;
+        let r = reinvite_impl(&env, &db, &org_id, &id, &claims.email).await;
         out.push((id, r));
     }
     Ok(bulk_result(out))
 }
 
-/// POST /api/organizations/{org_id}/users/{member_id}/accept
-/// Invite tokens are only issued by email, which is not configured yet.
-pub async fn accept_invite() -> Result<Json<Value>, AppError> {
-    Err(AppError::BadRequest(
-        "Invitation emails are not enabled on this server; the invite is accepted automatically once the account exists".to_string(),
-    ))
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptData {
+    token: String,
+    reset_password_key: Option<String>,
+}
+
+/// POST /api/organizations/{org_id}/users/{member_id}/accept (token from the invite email)
+#[worker::send]
+pub async fn accept_invite(
+    claims: Claims,
+    State(env): State<Arc<Env>>,
+    Path((org_id, member_id)): Path<(String, String)>,
+    Json(data): Json<AcceptData>,
+) -> Result<Json<Value>, AppError> {
+    let db = db::get_db(&env)?;
+    let invite = decode_invite(&env, &data.token)?;
+    if !invite.email.eq_ignore_ascii_case(&claims.email) {
+        return Err(AppError::BadRequest(
+            "Invitation was issued to a different account".to_string(),
+        ));
+    }
+    if invite.org_id != org_id || invite.member_id != member_id {
+        return Err(AppError::BadRequest(
+            "Error accepting the invitation".to_string(),
+        ));
+    }
+    let m = find_member_in_org(&db, &org_id, &member_id)
+        .await
+        .map_err(|_| AppError::BadRequest("Error accepting the invitation".to_string()))?;
+    if m.user_uuid != claims.sub {
+        return Err(AppError::BadRequest(
+            "Error accepting the invitation".to_string(),
+        ));
+    }
+    if m.status != membership_status::INVITED {
+        return Err(AppError::BadRequest(
+            "User already accepted the invitation".to_string(),
+        ));
+    }
+    let auto_enroll =
+        crate::handlers::org_policies::reset_password_auto_enroll(&env, &db, &org_id).await?;
+    let reset_key = data.reset_password_key.filter(|k| !k.is_empty());
+    if auto_enroll && reset_key.is_none() {
+        return Err(AppError::BadRequest(
+            "Reset password key is required, but not provided.".to_string(),
+        ));
+    }
+    crate::handlers::org_policies::check_user_allowed(
+        &db,
+        &m,
+        m.atype,
+        membership_status::ACCEPTED,
+        "join",
+    )
+    .await?;
+    let reset_key = if auto_enroll { reset_key } else { None };
+    db.batch(vec![
+        d1_query!(
+            &db,
+            "UPDATE users_organizations SET status = 1, reset_password_key = ?1,
+                invited_by_email = COALESCE(invited_by_email, ?2) WHERE uuid = ?3",
+            reset_key,
+            invite.invited_by_email.clone(),
+            m.uuid
+        )
+        .map_err(|_| AppError::Database)?,
+        d1_query!(
+            &db,
+            "DELETE FROM invitations WHERE email = ?1",
+            claims.email.to_lowercase()
+        )
+        .map_err(|_| AppError::Database)?,
+    ])
+    .await?;
+    if let (Some(inviter), true) = (invite.invited_by_email, crate::mail::mail_enabled(&env)) {
+        let org_name = find_org(&db, &org_id)
+            .await?
+            .map(|o| o.name)
+            .unwrap_or_default();
+        if let Err(e) =
+            crate::mail::send_invite_accepted(&env, &inviter, &claims.email, &org_name).await
+        {
+            log::warn!("invite-accepted email failed: {e}");
+        }
+    }
+    Ok(Json(json!({})))
 }
 
 #[derive(Deserialize)]
@@ -1882,6 +2153,26 @@ async fn confirm_impl(
         .map_err(|_| AppError::Database)?,
     ])
     .await?;
+    if crate::mail::mail_enabled(env) {
+        #[derive(Deserialize)]
+        struct Email {
+            email: String,
+        }
+        let email = db
+            .prepare("SELECT email FROM users WHERE uuid = ?1")
+            .bind(&[m.user_uuid.clone().into()])?
+            .first::<Email>(None)
+            .await?;
+        let org_name = find_org(db, &me.org_uuid)
+            .await?
+            .map(|o| o.name)
+            .unwrap_or_default();
+        if let Some(e) = email {
+            if let Err(err) = crate::mail::send_invite_confirmed(env, &e.email, &org_name).await {
+                log::warn!("invite-confirmed email failed: {err}");
+            }
+        }
+    }
     crate::notifications::publish_user_update(
         env.clone(),
         m.user_uuid,

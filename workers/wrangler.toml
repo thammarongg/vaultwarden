@@ -65,6 +65,10 @@ DISABLE_USER_REGISTRATION = "false"
 # BASE_URL = "https://vault.example.com"
 BASE_URL = "https://vault.asdevwishes.com"
 
+# Sender for invitations/recovery mail (Resend, verified domain vault.asdevwishes.com).
+# Mail is enabled only when the RESEND_API_KEY secret is also set.
+MAIL_FROM = "Vaultwarden <no-reply@vault.asdevwishes.com>"
+
 # Server-side password hashing PBKDF2 iterations (stored per-user).
 # Defaults to 600000, and will be clamped to a minimum of 600000 even if set lower.
 # Existing users whose password iterations are less than this value will be upgraded on login.
