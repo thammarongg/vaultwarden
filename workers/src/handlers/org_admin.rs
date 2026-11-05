@@ -394,3 +394,30 @@ pub async fn rotate_api_key(
 pub async fn empty_events() -> Json<Value> {
     Json(json!({"data": [], "object": "list", "continuationToken": null}))
 }
+
+/// GET /api/users/{user_id}/public-key (used to confirm members and emergency contacts)
+#[worker::send]
+pub async fn get_user_public_key(
+    _claims: Claims,
+    State(env): State<Arc<Env>>,
+    Path(user_id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let db = db::get_db(&env)?;
+    #[derive(Deserialize)]
+    struct Row {
+        uuid: String,
+        public_key: Option<String>,
+    }
+    let row: Row = db
+        .prepare("SELECT uuid, public_key FROM users WHERE uuid = ?1")
+        .bind(&[user_id.into()])?
+        .first(None)
+        .await?
+        .ok_or_else(|| AppError::NotFound("User doesn't exist".to_string()))?;
+    let key = row
+        .public_key
+        .ok_or_else(|| AppError::NotFound("User has no public_key".to_string()))?;
+    Ok(Json(
+        json!({"userId": row.uuid, "publicKey": key, "object": "userKey"}),
+    ))
+}

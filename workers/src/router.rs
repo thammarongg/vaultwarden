@@ -498,6 +498,10 @@ pub fn api_router(env: Env) -> Router {
             get(org_admin::empty_events),
         )
         .route("/api/ciphers/{id}/events", get(org_admin::empty_events))
+        .route(
+            "/api/users/{user_id}/public-key",
+            get(org_admin::get_user_public_key),
+        )
         .route("/api/plans", get(organizations::get_plans))
         .route("/api/config", get(config::config))
         // Meta endpoints (mirrors a subset of vaultwarden core/mod.rs)

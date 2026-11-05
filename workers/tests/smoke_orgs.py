@@ -177,6 +177,9 @@ def test_members(owner, org_id, col_a, col_b, cid_a, cid_b):
     eq((cols, ciphers), ({}, {}), "accepted member sees nothing")
 
     ids = [ms[alice.email]["id"], ms[bob.email]["id"]]
+    upk = owner.api("GET", f"/api/users/{ms[alice.email]['userId']}/public-key").json
+    eq((upk["publicKey"], upk["object"]), (PUBLIC_KEY, "userKey"), "user public key")
+    owner.api("GET", f"/api/users/{uuid.uuid4()}/public-key", expect=404)
     pk = owner.api("POST", f"/api/organizations/{org_id}/users/public-keys", body={"ids": ids}).json["data"]
     eq(sorted(p["key"] for p in pk), [PUBLIC_KEY, PUBLIC_KEY], "member public keys")
     owner.api("POST", f"/api/organizations/{org_id}/users/{ids[0]}/confirm", body={"key": ""}, expect=400)
