@@ -57,7 +57,7 @@ def last_invite(email):
     for key in ("email", "organizationName", "organizationId", "organizationUserId", "token",
                 "initOrganization", "orgUserHasExistingUser"):
         check(key in q, f"invite link has {key}")
-    check("<p>" in m["html"], "html body present")
+    check("<table" in m["html"] and "AsDevWishes Vault" in m["html"], "branded html body")
     return {k: v[0] for k, v in q.items()}
 
 

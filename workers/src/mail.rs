@@ -40,6 +40,99 @@ fn escape_html(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+const BRAND: &str = "AsDevWishes Vault";
+const BRAND_COLOR: &str = "#175ddc";
+
+/// Branded HTML version of a plain-text email (the text part is sent unchanged).
+///
+/// The text templates keep vaultwarden's wording; this derives the layout from them:
+/// a paragraph ending in `label: https://...` becomes a button, `code is: 123456` becomes a
+/// code box, other URLs become links, and the `===` footer moves to the card's footer.
+pub(crate) fn render_html(subject: &str, text: &str) -> String {
+    let (body, footer) = match text.split_once("\n\n===\n") {
+        Some((b, f)) => (b, f.trim()),
+        None => (text, ""),
+    };
+    let mut blocks = String::new();
+    let mut fallback_link = None;
+    for para in body.split("\n\n").map(str::trim).filter(|p| !p.is_empty()) {
+        if let Some((label, url)) = para
+            .rsplit_once(": ")
+            .filter(|(_, u)| (u.starts_with("https://") || u.starts_with("http://")) && !u.contains(char::is_whitespace))
+        {
+            let label = label.trim_start_matches("Click here to ").trim();
+            let label = if label.is_empty() { "Open" } else { label };
+            let mut chars = label.chars();
+            let label: String = chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default();
+            blocks.push_str(&format!(
+                r#"<table role="presentation" cellspacing="0" cellpadding="0" style="margin:24px 0"><tr><td style="border-radius:8px;background:{BRAND_COLOR}"><a href="{u}" style="display:inline-block;padding:12px 28px;font-size:16px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px">{l}</a></td></tr></table>"#,
+                u = escape_html(url),
+                l = escape_html(&label),
+            ));
+            fallback_link = Some(url.to_string());
+            continue;
+        }
+        if let Some((lead, code)) = para.split_once("code is: ") {
+            let code = code.split_whitespace().next().unwrap_or_default();
+            blocks.push_str(&format!(
+                r#"<p style="margin:0 0 12px">{}</p><div style="margin:8px 0 20px;padding:16px;text-align:center;background:#eef2ff;border:1px solid #c7d2fe;border-radius:8px;font-family:SFMono-Regular,Menlo,Consolas,monospace;font-size:32px;font-weight:700;letter-spacing:8px;color:#1e3a8a">{}</div>"#,
+                escape_html(&format!("{}code is:", lead)),
+                escape_html(code),
+            ));
+            continue;
+        }
+        blocks.push_str(&format!(
+            r#"<p style="margin:0 0 16px">{}</p>"#,
+            linkify(&escape_html(para)).replace('\n', "<br>")
+        ));
+    }
+    let fallback = fallback_link
+        .map(|u| {
+            format!(
+                r#"<p style="margin:16px 0 0;font-size:12px;color:#6b7280">Button not working? Copy this link into your browser:<br><span style="word-break:break-all;color:#374151">{}</span></p>"#,
+                escape_html(&u)
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>{subject}</title></head>
+<body style="margin:0;padding:0;background:#f3f4f6">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f3f4f6;padding:24px 12px"><tr><td align="center">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px;background:#ffffff;border-radius:12px;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937">
+<tr><td style="background:{BRAND_COLOR};padding:18px 28px"><span style="font-size:18px;font-weight:700;color:#ffffff">&#128274; {BRAND}</span></td></tr>
+<tr><td style="padding:28px 28px 8px"><h1 style="margin:0 0 18px;font-size:20px;line-height:1.3;color:#111827">{subject}</h1><div style="font-size:15px;line-height:1.6">{blocks}</div>{fallback}</td></tr>
+<tr><td style="padding:20px 28px 26px;border-top:1px solid #e5e7eb;font-size:12px;line-height:1.5;color:#6b7280">{footer}<br>If you didn't expect this email, you can ignore it.</td></tr>
+</table></td></tr></table></body></html>"#,
+        subject = escape_html(subject),
+        footer = linkify(&escape_html(footer)),
+    )
+}
+
+/// Turn bare http(s) URLs in already-escaped text into links.
+fn linkify(escaped: &str) -> String {
+    let mut out = String::with_capacity(escaped.len());
+    let mut rest = escaped;
+    while let Some(i) = rest.find("http") {
+        let (before, tail) = rest.split_at(i);
+        out.push_str(before);
+        if !(tail.starts_with("https://") || tail.starts_with("http://")) {
+            out.push_str("http");
+            rest = &tail[4..];
+            continue;
+        }
+        let end = tail
+            .find(|c: char| c.is_whitespace() || c == ')' || c == '<')
+            .unwrap_or(tail.len());
+        let url = tail[..end].trim_end_matches(['.', ',']);
+        out.push_str(&format!(
+            r#"<a href="{url}" style="color:{BRAND_COLOR}">{url}</a>"#
+        ));
+        rest = &tail[url.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Send one email. Errors are returned so callers can roll back (vaultwarden does for invites).
 pub async fn send_email(env: &Env, to: &str, subject: &str, text: &str) -> Result<(), AppError> {
     let (Some(key), Some(from)) = (
@@ -49,13 +142,7 @@ pub async fn send_email(env: &Env, to: &str, subject: &str, text: &str) -> Resul
         return Err(AppError::BadRequest("Email is not configured".to_string()));
     };
     let base = non_empty_var(env, "MAIL_API_URL").unwrap_or_else(|| RESEND_API_URL.to_string());
-    let html = format!(
-        "<div style=\"font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:15px;line-height:1.5\">{}</div>",
-        escape_html(text)
-            .split("\n\n")
-            .map(|p| format!("<p>{}</p>", p.replace('\n', "<br>")))
-            .collect::<String>()
-    );
+    let html = render_html(subject, text);
     let body = json!({
         "from": from,
         "to": [to],
@@ -368,4 +455,37 @@ pub async fn send_twofactor_token(env: &Env, to: &str, token: &str) -> Result<()
         "Your two-step verification code is: {token}\n\nUse this code to complete logging in with AsDevWishes Vault.{FOOTER}"
     );
     send_email(env, to, "AsDevWishes Vault Login Verification Code", &text).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn html_has_button_code_and_escaping() {
+        let h = render_html(
+            "Join <Family>",
+            "You have been invited to join the <Family> organization.\n\nClick here to join: https://vault.example/#/accept?a=1&b=2\n\n===\nThis email was sent by AsDevWishes Vault (vault.example).",
+        );
+        assert!(h.contains(r#"href="https://vault.example/#/accept?a=1&amp;b=2""#));
+        assert!(h.contains(">Join</a>"));
+        assert!(h.contains("&lt;Family&gt;") && !h.contains("<Family>"));
+        let c = render_html("Code", "Your two-step verification code is: 482913\n\nUse it.");
+        assert!(c.contains(">482913</div>"));
+    }
+
+    /// `MAIL_PREVIEW_DIR=/tmp/x cargo test --lib mail::tests::write_previews` writes sample HTML.
+    #[test]
+    fn write_previews() {
+        let Ok(dir) = std::env::var("MAIL_PREVIEW_DIR") else { return };
+        let samples = [
+            ("org-invite", "Join Family", format!("You have been invited to join the Family organization.\n\nClick here to join: https://vault.asdevwishes.com/#/accept-organization/?email=mom%40example.com&organizationName=Family&token=eyJhbGciOi...\n\nIf you do not wish to join this organization, you can safely ignore this email.{FOOTER}")),
+            ("2fa-code", "AsDevWishes Vault Login Verification Code", format!("Your two-step verification code is: 482913\n\nUse this code to complete logging in with AsDevWishes Vault.{FOOTER}")),
+            ("emergency-invite", "Emergency access for Thammarong", format!("You have been invited to become an emergency contact for Thammarong. To accept this invite, click the following link:\n\nClick here to join: https://vault.asdevwishes.com/#/accept-emergency/?id=1&name=Thammarong&token=eyJhbGciOi...\n\nIf you do not wish to become an emergency contact for Thammarong, you can safely ignore this email.{FOOTER}")),
+            ("emergency-initiated", "Emergency access request by Somchai initiated", format!("Somchai has initiated an emergency access request to Takeover your account. You may login on the web vault (https://vault.asdevwishes.com) and manually approve or reject this request.\n\nIf you do nothing, the request will automatically be approved after 7 day(s).{FOOTER}")),
+        ];
+        for (name, subject, text) in samples {
+            std::fs::write(format!("{dir}/{name}.html"), render_html(subject, &text)).unwrap();
+        }
+    }
 }
