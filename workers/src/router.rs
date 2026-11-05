@@ -6,7 +6,7 @@ use std::sync::Arc;
 use worker::Env;
 
 use crate::handlers::{
-    accounts, attachments, auth_requests, ciphers, config, devices, domains, emergency_access,
+    accounts, admin, attachments, auth_requests, ciphers, config, devices, domains, emergency_access,
     folders, identity, import, meta, org_admin, org_groups, org_policies, organizations, sends,
     sync, twofactor, twofactor_email, webauth, webauthn,
 };
@@ -603,6 +603,27 @@ pub fn api_router(env: Env) -> Router {
         // WebAuthn (stub - prevents 404 errors, passkeys not supported)
         .route("/api/webauthn", get(webauth::get_webauthn_credentials))
         // Two-factor authentication
+        // Admin page
+        .route("/admin", get(admin::admin_page).post(admin::login))
+        .route("/admin/", get(admin::admin_page))
+        .route("/admin/logout", get(admin::logout))
+        .route("/admin/users", get(admin::users_json))
+        .route("/admin/users/overview", get(admin::users_overview))
+        .route(
+            "/admin/users/{id}/invite/resend",
+            post(admin::resend_invite),
+        )
+        .route("/admin/users/{id}/{action}", post(admin::post_user_action))
+        .route("/admin/invite", post(admin::invite_user))
+        .route(
+            "/admin/organizations/overview",
+            get(admin::organizations_overview),
+        )
+        .route(
+            "/admin/organizations/{id}/delete",
+            post(admin::delete_organization),
+        )
+        .route("/admin/diagnostics", get(admin::diagnostics))
         .route("/api/two-factor", get(twofactor::get_twofactor))
         .route(
             "/api/two-factor/get-authenticator",

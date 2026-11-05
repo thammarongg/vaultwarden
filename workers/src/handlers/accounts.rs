@@ -677,11 +677,32 @@ pub async fn post_password(
         return Err(AppError::Unauthorized("Invalid password".to_string()));
     }
 
+    let (new_master_password_hash, new_key) = match (
+        payload.authentication_data,
+        payload.unlock_data,
+        payload.new_master_password_hash,
+        payload.key,
+    ) {
+        (Some(auth), Some(unlock), _, _) => {
+            if auth.kdf != unlock.kdf {
+                return Err(AppError::BadRequest(
+                    "KDF settings must be equal for authentication and unlock".to_string(),
+                ));
+            }
+            if !auth.salt.eq_ignore_ascii_case(&user.email) || !unlock.salt.eq_ignore_ascii_case(&user.email) {
+                return Err(AppError::BadRequest("Invalid master password salt".to_string()));
+            }
+            (auth.master_password_authentication_hash, unlock.master_key_wrapped_user_key)
+        }
+        (_, _, Some(hash), Some(key)) => (hash, key),
+        _ => return Err(AppError::BadRequest("Invalid request!".to_string())),
+    };
+
     // Generate new salt and hash the new password
     let new_salt = generate_salt()?;
     let password_iterations = server_password_iterations(&env) as i32;
     let new_hashed_password = hash_password_for_storage(
-        &payload.new_master_password_hash,
+        &new_master_password_hash,
         &new_salt,
         password_iterations as u32,
     )
@@ -698,7 +719,7 @@ pub async fn post_password(
         new_hashed_password,
         new_salt,
         password_iterations,
-        payload.key,
+        new_key,
         payload.master_password_hint,
         new_security_stamp,
         now,

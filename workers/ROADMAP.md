@@ -17,7 +17,7 @@ is the reference implementation for porting features.
 - R2: `vaultwarden-cf-attachments` (binding `ATTACHMENTS_BUCKET`)
 - Durable Objects: `HeavyDo` (CPU offload), `NotifyDo` (WebSocket live sync)
 - Secrets: `JWT_SECRET`, `JWT_REFRESH_SECRET`, `ALLOWED_EMAILS`, `RESEND_API_KEY` (mail on)
-- Web vault: bw_web_builds `v2026.6.4` downloaded into `public/web-vault/` (not committed)
+- Web vault: bw_web_builds `v2026.10.1` downloaded into `public/web-vault/` (not committed)
 
 ## Phases
 

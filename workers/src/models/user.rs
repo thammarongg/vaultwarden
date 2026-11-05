@@ -311,9 +311,13 @@ pub struct PasswordOrOtpData {
 #[serde(rename_all = "camelCase")]
 pub struct ChangePasswordRequest {
     pub master_password_hash: String,
-    pub new_master_password_hash: String,
     pub master_password_hint: Option<String>,
-    pub key: String,
+    /// Current web vaults (vaultwarden #7634).
+    pub authentication_data: Option<AuthenticationData>,
+    pub unlock_data: Option<UnlockData>,
+    /// Older clients.
+    pub new_master_password_hash: Option<String>,
+    pub key: Option<String>,
 }
 
 // For POST /accounts/kdf request - Change KDF settings

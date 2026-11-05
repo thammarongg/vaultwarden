@@ -77,10 +77,11 @@ start_server() {
 }
 
 STATUS=0
-start_server "${LOG}"
+start_server "${LOG}" --var "ADMIN_TOKEN:local-admin-token"
 SMOKE_BASE_URL="${BASE_URL}" python3 -I tests/smoke.py || STATUS=$?
 [ "${STATUS}" -eq 0 ] && { SMOKE_BASE_URL="${BASE_URL}" python3 -I tests/smoke_orgs.py || STATUS=$?; }
 [ "${STATUS}" -eq 0 ] && { SMOKE_BASE_URL="${BASE_URL}" python3 -I tests/smoke_emergency.py || STATUS=$?; }
+[ "${STATUS}" -eq 0 ] && { SMOKE_BASE_URL="${BASE_URL}" python3 -I tests/smoke_admin.py || STATUS=$?; }
 # WebAuthn needs ECDSA signing: `cryptography` via uv (skipped with a warning when uv is missing).
 if [ "${STATUS}" -eq 0 ]; then
   if command -v uv >/dev/null 2>&1; then

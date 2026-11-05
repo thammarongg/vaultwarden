@@ -551,7 +551,7 @@ async fn verify_password(db: &db::Db, user_id: &str, hash: Option<&str>) -> Resu
 }
 
 /// Statements deleting an organization and everything that references it.
-fn delete_org_statements(db: &db::Db, org_id: &str) -> Result<Vec<D1PreparedStatement>, AppError> {
+pub fn delete_org_statements(db: &db::Db, org_id: &str) -> Result<Vec<D1PreparedStatement>, AppError> {
     let binds = [org_id.into()];
     let mut stmts = db::delete_ciphers_statements(db, "organization_uuid = ?1", &binds)?;
     for sql in [

@@ -314,6 +314,16 @@ async fn authenticate_password_grant(
             return Err(AppError::Unauthorized("Invalid credentials".to_string()));
         }
     };
+    // Disabled from the admin page (vaultwarden: "This user has been disabled").
+    let enabled: Option<i32> = db
+        .prepare("SELECT enabled FROM users WHERE uuid = ?1")
+        .bind(&[user.id.clone().into()])?
+        .first(Some("enabled"))
+        .await
+        .map_err(|_| AppError::Database)?;
+    if enabled == Some(0) {
+        return Err(AppError::BadRequest("This user has been disabled".to_string()));
+    }
 
     // Bitwarden "login with device" flow:
     // When `authrequest` is present, clients send the auth-request access code in the `password`

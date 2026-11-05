@@ -54,7 +54,7 @@ directory = "./public/web-vault"
 not_found_handling = "404-page"
 html_handling = "auto-trailing-slash"
 # Only invoke Worker for API and Identity routes, serve static files directly for other routes
-run_worker_first = ["/api/*", "/identity/*", "/notifications/*"]
+run_worker_first = ["/api/*", "/identity/*", "/notifications/*", "/admin", "/admin/*"]
 
 [vars]
 # Show the "Create account" button; the server still only accepts emails matching the ALLOWED_EMAILS secret.
