@@ -34,10 +34,21 @@ is the reference implementation for porting features.
    an email sender (Cloudflare Email Service `send_email` binding); WebAuthn needs a
    wasm-compatible verifier.
 
+## Decisions
+
+- Schema: `sql/schema.sql` mirrors vaultwarden's SQLite schema exactly (checked by
+  `tests/schema_check.sh`); the Rust models read through `wk_*` views. Only deviation:
+  DATETIME stored as ISO-8601 (the importer converts). See AGENTS.md "Database schema".
+- Plan: Workers Free for now (heavy endpoints offloaded to `HeavyDo`); revisit at phase 3.
+
+## Backlog from the daily security/update watch
+
+- Port vaultwarden #7563 (2FA userVerificationToken) before moving the web vault past
+  v2026.6.4 (web vault 2026.7.1+ needs it to toggle 2FA).
+- Port #7837 (delete auth requests with the user — done by `db::delete_user_rows`),
+  #7450 (attachment v2 quota), #7777 (don't leak internal errors to clients).
+- `cargo update -p ctutils -p tokio` (RUSTSEC-2026-0385/0386).
+
 ## Open decisions
 
-- Schema strategy: converge `sql/schema.sql` toward vaultwarden's SQLite schema
-  (easier import and porting) or keep warden-worker's schema and map at import time.
-- Plan: Workers Free (10 ms CPU/request, heavy work offloaded to `HeavyDo`) vs
-  Workers Paid ($5/month). Organization sync on large vaults may need Paid.
-- Upstream: how to keep pulling fixes from warden-worker and from vaultwarden.
+- Upstream: how to keep pulling fixes from warden-worker now that the schema diverged.

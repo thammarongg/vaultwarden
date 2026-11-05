@@ -117,7 +117,7 @@ pub(crate) async fn decode_access_token(env: &Env, token: &str) -> Result<Claims
 
     let db = db::get_db_unconstrained(env)?;
     let current_sstamp = db
-        .prepare("SELECT security_stamp FROM users WHERE id = ?1")
+        .prepare("SELECT security_stamp FROM users WHERE uuid = ?1")
         .bind(&[claims.sub.clone().into()])?
         .first::<String>(Some("security_stamp"))
         .await

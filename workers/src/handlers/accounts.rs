@@ -150,7 +150,7 @@ pub async fn prelogin(
     let db = db::get_db(&env)?;
 
     let stmt = db.prepare(
-        "SELECT kdf_type, kdf_iterations, kdf_memory, kdf_parallelism FROM users WHERE email = ?1",
+        "SELECT client_kdf_type AS kdf_type, client_kdf_iter AS kdf_iterations, client_kdf_memory AS kdf_memory, client_kdf_parallelism AS kdf_parallelism FROM users WHERE email = ?1",
     );
     let query = stmt.bind(&[email.into()])?;
     let row: Option<Value> = query.first(None).await.map_err(|_| AppError::Database)?;
@@ -285,8 +285,8 @@ pub async fn register(
 
     d1_query!(
         &db,
-        "INSERT INTO users (id, name, email, master_password_hash, master_password_hint, password_salt, password_iterations, key, private_key, public_key, kdf_type, kdf_iterations, kdf_memory, kdf_parallelism, security_stamp, equivalent_domains, excluded_globals, totp_recover, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+        "INSERT INTO users (uuid, name, email, password_hash, password_hint, salt, password_iterations, akey, private_key, public_key, client_kdf_type, client_kdf_iter, client_kdf_memory, client_kdf_parallelism, security_stamp, equivalent_domains, excluded_globals, totp_recover, created_at, updated_at)
+         VALUES (?1, COALESCE(?2, ''), ?3, unhex(?4), ?5, unhex(?6), ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
          user.id,
          user.name,
          user.email,
@@ -349,7 +349,7 @@ pub async fn password_hint(
     let email = payload.email.to_lowercase();
 
     let hint: Option<String> = db
-        .prepare("SELECT master_password_hint FROM users WHERE email = ?1")
+        .prepare("SELECT password_hint AS master_password_hint FROM users WHERE email = ?1")
         .bind(&[email.into()])?
         .first(Some("master_password_hint"))
         .await
@@ -382,7 +382,7 @@ pub async fn revision_date(
 
     // get the user's updated_at timestamp
     let updated_at: Option<String> = db
-        .prepare("SELECT updated_at FROM users WHERE id = ?1")
+        .prepare("SELECT updated_at FROM users WHERE uuid = ?1")
         .bind(&[claims.sub.into()])?
         .first(Some("updated_at"))
         .await
@@ -418,7 +418,7 @@ pub async fn get_profile(
     let user_id = claims.sub;
 
     let user: User = db
-        .prepare("SELECT * FROM users WHERE id = ?1")
+        .prepare(crate::models::user::select_user_by_id_sql())
         .bind(&[user_id.clone().into()])?
         .first(None)
         .await?
@@ -446,7 +446,7 @@ pub async fn post_profile(
     let user_id = &claims.sub;
 
     let user_value: Value = db
-        .prepare("SELECT * FROM users WHERE id = ?1")
+        .prepare(crate::models::user::select_user_by_id_sql())
         .bind(&[user_id.clone().into()])?
         .first(None)
         .await
@@ -461,7 +461,7 @@ pub async fn post_profile(
 
     d1_query!(
         &db,
-        "UPDATE users SET name = ?1, updated_at = ?2 WHERE id = ?3",
+        "UPDATE users SET name = COALESCE(?1, ''), updated_at = ?2 WHERE uuid = ?3",
         user.name,
         now,
         user_id
@@ -513,7 +513,7 @@ pub async fn put_avatar(
     let user_id = &claims.sub;
 
     let user_value: Value = db
-        .prepare("SELECT * FROM users WHERE id = ?1")
+        .prepare(crate::models::user::select_user_by_id_sql())
         .bind(&[user_id.clone().into()])?
         .first(None)
         .await
@@ -528,7 +528,7 @@ pub async fn put_avatar(
 
     d1_query!(
         &db,
-        "UPDATE users SET avatar_color = ?1, updated_at = ?2 WHERE id = ?3",
+        "UPDATE users SET avatar_color = ?1, updated_at = ?2 WHERE uuid = ?3",
         user.avatar_color,
         now,
         user_id
@@ -563,7 +563,7 @@ pub async fn delete_account(
 
     // Get the user from the database
     let user: Value = db
-        .prepare("SELECT * FROM users WHERE id = ?1")
+        .prepare(crate::models::user::select_user_by_id_sql())
         .bind(&[user_id.clone().into()])?
         .first(None)
         .await
@@ -592,23 +592,8 @@ pub async fn delete_account(
     // Delete all user's sends and associated storage objects
     sends::delete_user_sends(&db, env.as_ref(), user_id).await?;
 
-    // Delete all user's ciphers
-    d1_query!(&db, "DELETE FROM ciphers WHERE user_id = ?1", user_id)
-        .map_err(|_| AppError::Database)?
-        .run()
-        .await?;
-
-    // Delete all user's folders
-    d1_query!(&db, "DELETE FROM folders WHERE user_id = ?1", user_id)
-        .map_err(|_| AppError::Database)?
-        .run()
-        .await?;
-
-    // Delete the user
-    d1_query!(&db, "DELETE FROM users WHERE id = ?1", user_id)
-        .map_err(|_| AppError::Database)?
-        .run()
-        .await?;
+    // Delete the user's ciphers, folders and every other row referencing the user.
+    db::delete_user_rows(&db, user_id).await?;
 
     Ok(Json(json!({})))
 }
@@ -625,7 +610,7 @@ pub async fn post_password(
 
     // Get the user from the database
     let user: Value = db
-        .prepare("SELECT * FROM users WHERE id = ?1")
+        .prepare(crate::models::user::select_user_by_id_sql())
         .bind(&[user_id.clone().into()])?
         .first(None)
         .await
@@ -659,7 +644,7 @@ pub async fn post_password(
     // Update user record
     d1_query!(
         &db,
-        "UPDATE users SET master_password_hash = ?1, password_salt = ?2, password_iterations = ?3, key = ?4, master_password_hint = ?5, security_stamp = ?6, updated_at = ?7 WHERE id = ?8",
+        "UPDATE users SET password_hash = unhex(?1), salt = unhex(?2), password_iterations = ?3, akey = ?4, password_hint = ?5, security_stamp = ?6, updated_at = ?7 WHERE uuid = ?8",
         new_hashed_password,
         new_salt,
         password_iterations,
@@ -691,7 +676,7 @@ pub async fn post_rotatekey(
 
     // Get the user from the database
     let user: Value = db
-        .prepare("SELECT * FROM users WHERE id = ?1")
+        .prepare(crate::models::user::select_user_by_id_sql())
         .bind(&[user_id.clone().into()])?
         .first(None)
         .await
@@ -765,23 +750,20 @@ pub async fn post_rotatekey(
     let validation_results = db
         .batch(vec![
             // Count ciphers in DB
-            db.prepare(
-                "SELECT COUNT(*) AS cnt FROM ciphers WHERE user_id = ?1 AND organization_id IS NULL",
-            )
-            .bind(&[user_id.clone().into()])?,
-            // Count folders in DB
-            db.prepare("SELECT COUNT(*) AS cnt FROM folders WHERE user_id = ?1")
+            db.prepare("SELECT COUNT(*) AS cnt FROM ciphers WHERE user_uuid = ?1 AND organization_uuid IS NULL")
                 .bind(&[user_id.clone().into()])?,
+            // Count folders in DB
+            db.prepare("SELECT COUNT(*) AS cnt FROM folders WHERE user_uuid = ?1").bind(&[user_id.clone().into()])?,
             // DB cipher IDs EXCEPT request cipher IDs (finds missing)
             db.prepare(
-                "SELECT id FROM ciphers WHERE user_id = ?1 AND organization_id IS NULL
+                "SELECT uuid FROM ciphers WHERE user_uuid = ?1 AND organization_uuid IS NULL
                  EXCEPT
                  SELECT value FROM json_each(?2) LIMIT 1",
             )
             .bind(&[user_id.clone().into(), cipher_ids_json.into()])?,
             // DB folder IDs EXCEPT request folder IDs (finds missing)
             db.prepare(
-                "SELECT id FROM folders WHERE user_id = ?1
+                "SELECT uuid FROM folders WHERE user_uuid = ?1
                  EXCEPT
                  SELECT value FROM json_each(?2) LIMIT 1",
             )
@@ -842,7 +824,7 @@ pub async fn post_rotatekey(
         };
         let stmt = d1_query!(
             &db,
-            "UPDATE folders SET name = ?1, updated_at = ?2 WHERE id = ?3 AND user_id = ?4",
+            "UPDATE folders SET name = ?1, updated_at = ?2 WHERE uuid = ?3 AND user_uuid = ?4",
             folder.name,
             now,
             folder_id,
@@ -864,20 +846,39 @@ pub async fn post_rotatekey(
 
         let cipher_data = CipherData::new(cipher.name, cipher.notes, cipher.type_fields);
 
-        let data = serde_json::to_string(&cipher_data).map_err(|_| AppError::Internal)?;
+        let blob = serde_json::to_value(&cipher_data).map_err(|_| AppError::Internal)?;
+        let cols = crate::models::cipher::CipherColumns::from_blob(cipher.r#type, &blob);
 
-        let stmt = d1_query!(
-            &db,
-            "UPDATE ciphers SET data = ?1, folder_id = ?2, favorite = ?3, updated_at = ?4 WHERE id = ?5 AND user_id = ?6",
-            data,
-            cipher.folder_id,
-            cipher.favorite.unwrap_or(false),
-            now,
-            cipher_id,
-            user_id
-        )
-        .map_err(|_| AppError::Database)?;
-        cipher_statements.push(stmt);
+        cipher_statements.push(
+            crate::models::cipher::update_cipher_stmt(
+                &db,
+                cipher_id,
+                user_id,
+                None,
+                cipher.r#type,
+                &cols,
+                &now,
+            )
+            .map_err(|_| AppError::Database)?,
+        );
+        cipher_statements.extend(
+            crate::models::cipher::set_folder_stmts(
+                &db,
+                cipher_id,
+                user_id,
+                cipher.folder_id.as_deref(),
+            )
+            .map_err(|_| AppError::Database)?,
+        );
+        cipher_statements.extend(
+            crate::models::cipher::set_favorite_stmts(
+                &db,
+                cipher_id,
+                user_id,
+                cipher.favorite.unwrap_or(false),
+            )
+            .map_err(|_| AppError::Database)?,
+        );
 
         // Update attachments key and encrypted filename when rotating.
         // The Bitwarden clients send `attachments2` only during key rotation.
@@ -885,10 +886,9 @@ pub async fn post_rotatekey(
             for (attachment_id, attachment) in attachments2 {
                 let stmt = d1_query!(
                     &db,
-                    "UPDATE attachments SET file_name = ?1, akey = ?2, updated_at = ?3 WHERE id = ?4 AND cipher_id = ?5",
+                    "UPDATE attachments SET file_name = ?1, akey = ?2 WHERE id = ?3 AND cipher_uuid = ?4",
                     attachment.file_name,
                     attachment.key,
-                    now,
                     attachment_id,
                     cipher_id
                 )
@@ -934,7 +934,7 @@ pub async fn post_rotatekey(
     // Update user record with new keys and password
     d1_query!(
         &db,
-        "UPDATE users SET master_password_hash = ?1, password_salt = ?2, password_iterations = ?3, key = ?4, private_key = ?5, kdf_type = ?6, kdf_iterations = ?7, kdf_memory = ?8, kdf_parallelism = ?9, security_stamp = ?10, updated_at = ?11 WHERE id = ?12",
+        "UPDATE users SET password_hash = unhex(?1), salt = unhex(?2), password_iterations = ?3, akey = ?4, private_key = ?5, client_kdf_type = ?6, client_kdf_iter = ?7, client_kdf_memory = ?8, client_kdf_parallelism = ?9, security_stamp = ?10, updated_at = ?11 WHERE uuid = ?12",
         new_hashed_password,
         new_salt,
         password_iterations,
@@ -969,7 +969,7 @@ pub async fn post_kdf(
 
     // Get the user from the database
     let user: Value = db
-        .prepare("SELECT * FROM users WHERE id = ?1")
+        .prepare(crate::models::user::select_user_by_id_sql())
         .bind(&[user_id.clone().into()])?
         .first(None)
         .await
@@ -1031,7 +1031,7 @@ pub async fn post_kdf(
 
     d1_query!(
         &db,
-        "UPDATE users SET master_password_hash = ?1, password_salt = ?2, password_iterations = ?3, key = ?4, kdf_type = ?5, kdf_iterations = ?6, kdf_memory = ?7, kdf_parallelism = ?8, security_stamp = ?9, updated_at = ?10 WHERE id = ?11",
+        "UPDATE users SET password_hash = unhex(?1), salt = unhex(?2), password_iterations = ?3, akey = ?4, client_kdf_type = ?5, client_kdf_iter = ?6, client_kdf_memory = ?7, client_kdf_parallelism = ?8, security_stamp = ?9, updated_at = ?10 WHERE uuid = ?11",
         new_hashed_password,
         new_salt,
         password_iterations,
@@ -1065,7 +1065,7 @@ pub async fn post_sstamp(
 
     // Load the user to verify credentials
     let user: User = db
-        .prepare("SELECT * FROM users WHERE id = ?1")
+        .prepare(crate::models::user::select_user_by_id_sql())
         .bind(&[user_id.clone().into()])?
         .first(None)
         .await
@@ -1093,7 +1093,7 @@ pub async fn post_sstamp(
 
     d1_query!(
         &db,
-        "UPDATE users SET security_stamp = ?1, updated_at = ?2 WHERE id = ?3",
+        "UPDATE users SET security_stamp = ?1, updated_at = ?2 WHERE uuid = ?3",
         new_security_stamp,
         now,
         user_id

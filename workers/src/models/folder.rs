@@ -10,6 +10,9 @@ pub struct Folder {
     pub updated_at: String,
 }
 
+/// Columns of `folders` (vaultwarden schema) aliased to the `Folder` struct.
+pub const FOLDER_COLS: &str = "uuid AS id, user_uuid AS user_id, name, created_at, updated_at";
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FolderResponse {

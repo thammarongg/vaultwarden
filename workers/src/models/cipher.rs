@@ -453,3 +453,250 @@ pub struct PartialCipherData {
     pub folder_id: Option<String>,
     pub favorite: bool,
 }
+
+// ---------------------------------------------------------------------------
+// Storage in the vaultwarden schema
+// ---------------------------------------------------------------------------
+//
+// The Worker models a cipher as one JSON blob (`CipherData`: name, notes, <typeKey>, fields,
+// passwordHistory, reprompt, key). vaultwarden splits it into columns: `name`, `notes`,
+// `fields` (JSON), `data` (JSON of the type-specific object only), `password_history` (JSON),
+// `reprompt`, `key`. Per-user state lives in `favorites`, `folders_ciphers` and `archives`.
+// Reads go through the `wk_ciphers` view, which rebuilds the blob (see sql/schema.sql).
+
+/// JSON key of the type-specific object for a cipher type.
+pub fn type_data_key(atype: i32) -> &'static str {
+    match atype {
+        1 => "login",
+        2 => "secureNote",
+        3 => "card",
+        4 => "identity",
+        5 => "sshKey",
+        6 => "bankAccount",
+        7 => "driversLicense",
+        8 => "passport",
+        _ => "unknownType",
+    }
+}
+
+/// Drop the client-side `response` key from an object or from every object in an array
+/// (vaultwarden `clean_cipher_data`).
+fn strip_response_keys(mut value: Value) -> Value {
+    match &mut value {
+        Value::Object(map) => {
+            map.remove("response");
+        }
+        Value::Array(items) => {
+            for item in items.iter_mut().filter_map(Value::as_object_mut) {
+                item.remove("response");
+            }
+        }
+        _ => {}
+    }
+    value
+}
+
+/// Column values for one row of `ciphers` (vaultwarden layout).
+#[derive(Debug, Clone)]
+pub struct CipherColumns {
+    pub name: String,
+    pub notes: Option<String>,
+    pub fields: Option<String>,
+    pub data: String,
+    pub password_history: Option<String>,
+    pub reprompt: Option<i32>,
+    pub key: Option<String>,
+}
+
+impl CipherColumns {
+    /// Split the Worker's cipher JSON blob into vaultwarden's columns.
+    pub fn from_blob(atype: i32, blob: &Value) -> Self {
+        let get = |k: &str| blob.get(k).filter(|v| !v.is_null());
+        let mut type_data = get(type_data_key(atype)).cloned().unwrap_or(Value::Null);
+        if let Some(obj) = type_data.as_object_mut() {
+            obj.remove("response");
+            if let Some(uris) = obj.remove("uris") {
+                obj.insert("uris".to_string(), strip_response_keys(uris));
+            }
+        }
+        Self {
+            name: get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            notes: get("notes").and_then(Value::as_str).map(str::to_string),
+            fields: get("fields").map(|f| strip_response_keys(f.clone()).to_string()),
+            data: type_data.to_string(),
+            password_history: get("passwordHistory").map(Value::to_string),
+            reprompt: get("reprompt").and_then(Value::as_i64).map(|r| r as i32),
+            key: get("key").and_then(Value::as_str).map(str::to_string),
+        }
+    }
+}
+
+/// `INSERT INTO ciphers` for a new row (vaultwarden layout).
+#[allow(clippy::too_many_arguments)]
+pub fn insert_cipher_stmt(
+    db: &crate::db::Db,
+    id: &str,
+    user_id: Option<&str>,
+    organization_id: Option<&str>,
+    atype: i32,
+    cols: &CipherColumns,
+    created_at: &str,
+    updated_at: &str,
+) -> Result<worker::D1PreparedStatement, worker::Error> {
+    crate::d1_query!(
+        db,
+        "INSERT INTO ciphers (uuid, created_at, updated_at, user_uuid, organization_uuid, atype, name, notes, fields, data, password_history, reprompt, \"key\")
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        id,
+        created_at,
+        updated_at,
+        user_id,
+        organization_id,
+        atype,
+        cols.name,
+        cols.notes,
+        cols.fields,
+        cols.data,
+        cols.password_history,
+        cols.reprompt,
+        cols.key,
+    )
+}
+
+/// `UPDATE ciphers` content columns of a user's cipher (vaultwarden layout).
+#[allow(clippy::too_many_arguments)]
+pub fn update_cipher_stmt(
+    db: &crate::db::Db,
+    id: &str,
+    user_id: &str,
+    organization_id: Option<&str>,
+    atype: i32,
+    cols: &CipherColumns,
+    updated_at: &str,
+) -> Result<worker::D1PreparedStatement, worker::Error> {
+    crate::d1_query!(
+        db,
+        "UPDATE ciphers SET organization_uuid = ?1, atype = ?2, name = ?3, notes = ?4, fields = ?5, data = ?6, password_history = ?7, reprompt = ?8, \"key\" = ?9, updated_at = ?10
+         WHERE uuid = ?11 AND user_uuid = ?12",
+        organization_id,
+        atype,
+        cols.name,
+        cols.notes,
+        cols.fields,
+        cols.data,
+        cols.password_history,
+        cols.reprompt,
+        cols.key,
+        updated_at,
+        id,
+        user_id,
+    )
+}
+
+/// Put a cipher in `folder_id` (or no folder) for `user_id`: vaultwarden `move_to_folder`.
+pub fn set_folder_stmts(
+    db: &crate::db::Db,
+    cipher_id: &str,
+    user_id: &str,
+    folder_id: Option<&str>,
+) -> Result<Vec<worker::D1PreparedStatement>, worker::Error> {
+    let folder_id = folder_id.filter(|f| !f.is_empty());
+    Ok(vec![
+        crate::d1_query!(
+            db,
+            "DELETE FROM folders_ciphers WHERE cipher_uuid = ?1 AND folder_uuid IN (SELECT uuid FROM folders WHERE user_uuid = ?2)",
+            cipher_id,
+            user_id
+        )?,
+        crate::d1_query!(
+            db,
+            "INSERT INTO folders_ciphers (cipher_uuid, folder_uuid) SELECT ?1, ?2 WHERE ?2 IS NOT NULL",
+            cipher_id,
+            folder_id
+        )?,
+    ])
+}
+
+/// Mark/unmark a cipher as favorite for `user_id`: vaultwarden `set_favorite`.
+pub fn set_favorite_stmts(
+    db: &crate::db::Db,
+    cipher_id: &str,
+    user_id: &str,
+    favorite: bool,
+) -> Result<Vec<worker::D1PreparedStatement>, worker::Error> {
+    Ok(vec![
+        crate::d1_query!(
+            db,
+            "DELETE FROM favorites WHERE user_uuid = ?1 AND cipher_uuid = ?2",
+            user_id,
+            cipher_id
+        )?,
+        crate::d1_query!(
+            db,
+            "INSERT INTO favorites (user_uuid, cipher_uuid) SELECT ?1, ?2 WHERE ?3",
+            user_id,
+            cipher_id,
+            favorite as i32
+        )?,
+    ])
+}
+
+/// Archive (Some(ts)) or unarchive (None) a cipher for `user_id`.
+pub fn set_archived_stmts(
+    db: &crate::db::Db,
+    cipher_id: &str,
+    user_id: &str,
+    archived_at: Option<&str>,
+) -> Result<Vec<worker::D1PreparedStatement>, worker::Error> {
+    Ok(vec![
+        crate::d1_query!(db, "DELETE FROM archives WHERE user_uuid = ?1 AND cipher_uuid = ?2", user_id, cipher_id)?,
+        crate::d1_query!(
+            db,
+            "INSERT INTO archives (user_uuid, cipher_uuid, archived_at) SELECT ?1, ?2, ?3 WHERE ?3 IS NOT NULL",
+            user_id,
+            cipher_id,
+            archived_at
+        )?,
+    ])
+}
+
+/// All statements to create a cipher row plus its per-user folder/favorite/archive state.
+#[allow(clippy::too_many_arguments)]
+pub fn create_cipher_stmts(
+    db: &crate::db::Db,
+    id: &str,
+    user_id: &str,
+    organization_id: Option<&str>,
+    atype: i32,
+    blob: &Value,
+    folder_id: Option<&str>,
+    favorite: bool,
+    archived_at: Option<&str>,
+    created_at: &str,
+    updated_at: &str,
+) -> Result<Vec<worker::D1PreparedStatement>, worker::Error> {
+    let cols = CipherColumns::from_blob(atype, blob);
+    let mut out = vec![insert_cipher_stmt(
+        db,
+        id,
+        Some(user_id),
+        organization_id,
+        atype,
+        &cols,
+        created_at,
+        updated_at,
+    )?];
+    if folder_id.is_some_and(|f| !f.is_empty()) {
+        out.extend(set_folder_stmts(db, id, user_id, folder_id)?);
+    }
+    if favorite {
+        out.extend(set_favorite_stmts(db, id, user_id, true)?);
+    }
+    if archived_at.is_some() {
+        out.extend(set_archived_stmts(db, id, user_id, archived_at)?);
+    }
+    Ok(out)
+}

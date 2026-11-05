@@ -9,6 +9,21 @@ fn default_json_array_string() -> String {
     "[]".to_string()
 }
 
+/// Columns of `users` (vaultwarden schema) aliased to the `User` struct's field names.
+/// BLOB hash/salt are exposed as lowercase hex; NOT NULL `name` uses '' for "no name".
+pub const USER_COLS: &str = "uuid AS id, NULLIF(name, '') AS name, avatar_color, email, \
+    (verified_at IS NOT NULL) AS email_verified, lower(hex(password_hash)) AS master_password_hash, \
+    password_hint AS master_password_hint, NULLIF(lower(hex(salt)), '') AS password_salt, \
+    password_iterations, akey AS key, COALESCE(private_key, '') AS private_key, \
+    COALESCE(public_key, '') AS public_key, client_kdf_type AS kdf_type, client_kdf_iter AS kdf_iterations, \
+    client_kdf_memory AS kdf_memory, client_kdf_parallelism AS kdf_parallelism, security_stamp, \
+    equivalent_domains, excluded_globals, totp_recover, created_at, updated_at";
+
+/// `SELECT <USER_COLS> FROM users WHERE uuid = ?1`
+pub fn select_user_by_id_sql() -> String {
+    format!("SELECT {USER_COLS} FROM users WHERE uuid = ?1")
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct User {
     pub id: String,
@@ -62,11 +77,15 @@ impl PasswordVerification {
 
 impl User {
     pub async fn find_by_email(db: &crate::db::Db, email: &str) -> Result<Option<Self>, AppError> {
-        let row: Option<Value> = d1_query!(db, "SELECT * FROM users WHERE email = ?1", email)
-            .map_err(|_| AppError::Database)?
-            .first(None)
-            .await
-            .map_err(|_| AppError::Database)?;
+        let row: Option<Value> = d1_query!(
+            db,
+            format!("SELECT {USER_COLS} FROM users WHERE email = ?1"),
+            email
+        )
+        .map_err(|_| AppError::Database)?
+        .first(None)
+        .await
+        .map_err(|_| AppError::Database)?;
 
         row.map(|row| serde_json::from_value(row).map_err(|_| AppError::Internal))
             .transpose()

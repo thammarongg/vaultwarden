@@ -39,7 +39,7 @@ pub async fn get_sync_data(
 
     // Fetch profile
     let user: User = db
-        .prepare("SELECT * FROM users WHERE id = ?1")
+        .prepare(crate::models::user::select_user_by_id_sql())
         .bind(&[user_id.clone().into()])?
         .first(None)
         .await?
@@ -72,7 +72,10 @@ pub async fn get_sync_data(
 
     // Fetch folders
     let folders_db: Vec<Folder> = db
-        .prepare("SELECT * FROM folders WHERE user_id = ?1")
+        .prepare(format!(
+            "SELECT {} FROM folders WHERE user_uuid = ?1",
+            crate::models::folder::FOLDER_COLS
+        ))
         .bind(&[user_id.clone().into()])?
         .all()
         .await?

@@ -106,7 +106,7 @@ pub async fn purge_deleted_ciphers(env: &Env) -> Result<u32, worker::Error> {
     // First, get the list of affected user IDs before deletion
     let affected_users_result: Vec<AffectedUser> = d1_query!(
         &db,
-        "SELECT DISTINCT user_id FROM ciphers WHERE deleted_at IS NOT NULL AND deleted_at < ?1 AND user_id IS NOT NULL",
+        "SELECT DISTINCT user_uuid AS user_id FROM ciphers WHERE deleted_at IS NOT NULL AND deleted_at < ?1 AND user_uuid IS NOT NULL",
         cutoff_str
     )
     .map_err(|e| worker::Error::RustError(e.to_string()))?
@@ -143,13 +143,11 @@ pub async fn purge_deleted_ciphers(env: &Env) -> Result<u32, worker::Error> {
         }
 
         // Delete the records
-        d1_query!(
+        db.batch(crate::db::delete_ciphers_statements(
             &db,
-            "DELETE FROM ciphers WHERE deleted_at IS NOT NULL AND deleted_at < ?1",
-            cutoff_str
-        )
-        .map_err(|e| worker::Error::RustError(e.to_string()))?
-        .run()
+            "deleted_at IS NOT NULL AND deleted_at < ?1",
+            &[cutoff_str.clone().into()],
+        )?)
         .await?;
 
         log::info!("Successfully purged {} soft-deleted cipher(s)", count);
@@ -158,7 +156,7 @@ pub async fn purge_deleted_ciphers(env: &Env) -> Result<u32, worker::Error> {
         for user_id in &affected_user_ids {
             d1_query!(
                 &db,
-                "UPDATE users SET updated_at = ?1 WHERE id = ?2",
+                "UPDATE users SET updated_at = ?1 WHERE uuid = ?2",
                 now_str,
                 user_id
             )
@@ -223,7 +221,7 @@ pub async fn purge_expired_sends(env: &Env) -> Result<u32, worker::Error> {
 
     for uid in &user_ids {
         let _ = db
-            .prepare("UPDATE users SET updated_at = ?1 WHERE id = ?2")
+            .prepare("UPDATE users SET updated_at = ?1 WHERE uuid = ?2")
             .bind(&[now.clone().into(), uid.clone().into()])
             .map_err(|e| worker::Error::RustError(e.to_string()))?
             .run()

@@ -49,20 +49,16 @@ impl AttachmentDB {
         db.batch(vec![
             d1_query!(
                 db,
-                "INSERT INTO attachments (id, cipher_id, file_name, file_size, akey, created_at, updated_at, organization_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO attachments (id, cipher_uuid, file_name, file_size, akey) VALUES (?1, ?2, ?3, ?4, ?5)",
                 self.id,
                 self.cipher_id,
                 self.file_name,
                 self.file_size,
-                self.akey,
-                self.created_at,
-                self.updated_at,
-                self.organization_id
+                self.akey
             )
             .map_err(|_| AppError::Database)?,
-            d1_query!(db, "DELETE FROM attachments_pending WHERE id = ?1", self.id)
-                .map_err(|_| AppError::Database)?,
-            d1_query!(db, "UPDATE ciphers SET updated_at = ?1 WHERE id = ?2", &now, self.cipher_id)
+            d1_query!(db, "DELETE FROM attachments_pending WHERE id = ?1", self.id).map_err(|_| AppError::Database)?,
+            d1_query!(db, "UPDATE ciphers SET updated_at = ?1 WHERE uuid = ?2", &now, self.cipher_id)
                 .map_err(|_| AppError::Database)?,
         ])
         .await?;

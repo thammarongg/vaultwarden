@@ -31,7 +31,7 @@ pub async fn import_data(
     // Get existing folders for this user
     let existing_folder_rows = d1_query!(
         &db,
-        "SELECT id FROM folders WHERE user_id = ?1",
+        "SELECT uuid AS id FROM folders WHERE user_uuid = ?1",
         &claims.sub
     )
     .map_err(|_| AppError::Database)?
@@ -63,7 +63,7 @@ pub async fn import_data(
 
                 let stmt = d1_query!(
                     &db,
-                    "INSERT INTO folders (id, user_id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    "INSERT INTO folders (uuid, user_uuid, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
                     folder.id,
                     folder.user_id,
                     folder.name,
@@ -88,7 +88,7 @@ pub async fn import_data(
 
             let stmt = d1_query!(
                 &db,
-                "INSERT INTO folders (id, user_id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO folders (uuid, user_uuid, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
                 folder.id,
                 folder.user_id,
                 folder.name,
@@ -154,24 +154,22 @@ pub async fn import_data(
             attachments: None,
         };
 
-        let data = serde_json::to_string(&cipher.data).map_err(|_| AppError::Internal)?;
-
-        let stmt = d1_query!(
-            &db,
-            "INSERT INTO ciphers (id, user_id, organization_id, type, data, favorite, folder_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-             cipher.id,
-             cipher.user_id,
-             cipher.organization_id,
-             cipher.r#type,
-             data,
-             cipher.favorite,
-             cipher.folder_id,
-             cipher.created_at,
-             cipher.updated_at,
-        ).map_err(|_| AppError::Database)?;
-
-        cipher_statements.push(stmt);
+        cipher_statements.extend(
+            crate::models::cipher::create_cipher_stmts(
+                &db,
+                &cipher.id,
+                &claims.sub,
+                cipher.organization_id.as_deref(),
+                cipher.r#type,
+                &cipher.data,
+                cipher.folder_id.as_deref(),
+                cipher.favorite,
+                None,
+                &cipher.created_at,
+                &cipher.updated_at,
+            )
+            .map_err(|_| AppError::Database)?,
+        );
     }
 
     // Execute cipher inserts in batches

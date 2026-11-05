@@ -1,4 +1,3 @@
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use constant_time_eq::constant_time_eq;
 use js_sys::Uint8Array;
 use pbkdf2::pbkdf2_hmac;
@@ -118,7 +117,8 @@ pub fn generate_salt() -> Result<String, AppError> {
         .get_random_values_with_array_buffer_view(&salt)
         .map_err(|e| AppError::Crypto(format!("Failed to generate random salt: {:?}", e)))?;
 
-    Ok(BASE64.encode(salt.to_vec()))
+    // Hex so it can be stored as a raw BLOB via SQL `unhex()` (vaultwarden stores users.salt as BLOB).
+    Ok(hex::encode(salt.to_vec()))
 }
 
 /// Hashes the client-provided master password hash with server-side PBKDF2.
@@ -128,8 +128,7 @@ pub async fn hash_password_for_storage(
     salt: &str,
     iterations: u32,
 ) -> Result<String, AppError> {
-    let salt_bytes = BASE64
-        .decode(salt)
+    let salt_bytes = hex::decode(salt)
         .map_err(|e| AppError::Crypto(format!("Failed to decode salt: {:?}", e)))?;
 
     let derived = pbkdf2_sha256(
@@ -139,7 +138,7 @@ pub async fn hash_password_for_storage(
         KEY_LENGTH_BITS,
     )?;
 
-    Ok(BASE64.encode(derived))
+    Ok(hex::encode(derived))
 }
 
 /// Verifies a password against a stored hash.

@@ -1,0 +1,2 @@
+# Keep rustfmt defaults for this crate (stops rustfmt from picking up ../rustfmt.toml).
+edition = "2021"

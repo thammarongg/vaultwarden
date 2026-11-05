@@ -70,7 +70,7 @@ pub async fn get_authenticator(
 
     // Verify master password
     let user_value: Value = db
-        .prepare("SELECT * FROM users WHERE id = ?1")
+        .prepare(crate::models::user::select_user_by_id_sql())
         .bind(&[user_id.clone().into()])?
         .first(None)
         .await
@@ -117,7 +117,7 @@ pub async fn activate_authenticator(
 
     // Verify master password
     let user_value: Value = db
-        .prepare("SELECT * FROM users WHERE id = ?1")
+        .prepare(crate::models::user::select_user_by_id_sql())
         .bind(&[user_id.clone().into()])?
         .first(None)
         .await
@@ -225,7 +225,7 @@ pub async fn disable_twofactor(
 
     // Verify master password
     let user_value: Value = db
-        .prepare("SELECT * FROM users WHERE id = ?1")
+        .prepare(crate::models::user::select_user_by_id_sql())
         .bind(&[user_id.clone().into()])?
         .first(None)
         .await
@@ -282,7 +282,7 @@ pub async fn disable_authenticator(
 
     // Verify master password (OTP not supported in this minimal implementation)
     let user_value: Value = db
-        .prepare("SELECT * FROM users WHERE id = ?1")
+        .prepare(crate::models::user::select_user_by_id_sql())
         .bind(&[user_id.clone().into()])?
         .first(None)
         .await
@@ -362,7 +362,7 @@ pub async fn get_recover(
 
     // Verify master password
     let user_value: Value = db
-        .prepare("SELECT * FROM users WHERE id = ?1")
+        .prepare(crate::models::user::select_user_by_id_sql())
         .bind(&[user_id.clone().into()])?
         .first(None)
         .await
@@ -400,7 +400,7 @@ async fn generate_recovery_code_for_user(
 ) -> Result<(), AppError> {
     // Check if recovery code already exists
     let user_value: Value = db
-        .prepare("SELECT totp_recover FROM users WHERE id = ?1")
+        .prepare("SELECT totp_recover FROM users WHERE uuid = ?1")
         .bind(&[user_id.into()])?
         .first(None)
         .await
@@ -416,7 +416,7 @@ async fn generate_recovery_code_for_user(
         let recovery_code = generate_recovery_code()?;
         d1_query!(
             db,
-            "UPDATE users SET totp_recover = ?1 WHERE id = ?2",
+            "UPDATE users SET totp_recover = ?1 WHERE uuid = ?2",
             &recovery_code,
             user_id
         )
@@ -446,7 +446,7 @@ async fn clear_recovery_if_no_twofactor(db: &crate::db::Db, user_id: &str) -> Re
     if remaining.is_empty() {
         d1_query!(
             db,
-            "UPDATE users SET totp_recover = NULL WHERE id = ?1",
+            "UPDATE users SET totp_recover = NULL WHERE uuid = ?1",
             user_id
         )
         .map_err(|_| AppError::Database)?

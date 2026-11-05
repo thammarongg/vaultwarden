@@ -113,7 +113,7 @@ impl AuthRequest {
     pub async fn insert(&self, db: &crate::db::Db) -> Result<(), AppError> {
         d1_query!(
             db,
-            "INSERT INTO auth_requests (id, user_id, request_device_identifier, device_type, request_ip, response_device_id, access_code, public_key, enc_key, master_password_hash, approved, creation_date, response_date, authentication_date)
+            "INSERT INTO auth_requests (uuid, user_uuid, request_device_identifier, device_type, request_ip, response_device_id, access_code, public_key, enc_key, master_password_hash, approved, creation_date, response_date, authentication_date)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             &self.id,
             &self.user_id,
@@ -151,7 +151,7 @@ impl AuthRequest {
                  approved = ?4,
                  response_date = ?5,
                  authentication_date = ?6
-             WHERE id = ?7",
+             WHERE uuid = ?7",
             self.response_device_id.as_deref(),
             self.enc_key.as_deref(),
             self.master_password_hash.as_deref(),
@@ -169,7 +169,7 @@ impl AuthRequest {
     }
 
     pub async fn delete(&self, db: &crate::db::Db) -> Result<(), AppError> {
-        d1_query!(db, "DELETE FROM auth_requests WHERE id = ?1", &self.id)
+        d1_query!(db, "DELETE FROM auth_requests WHERE uuid = ?1", &self.id)
             .map_err(|_| AppError::Database)?
             .run()
             .await
@@ -179,7 +179,7 @@ impl AuthRequest {
     }
 
     pub async fn find_by_id(db: &crate::db::Db, id: &str) -> Result<Option<Self>, AppError> {
-        let row: Option<Value> = d1_query!(db, "SELECT * FROM auth_requests WHERE id = ?1", id)
+        let row: Option<Value> = d1_query!(db, "SELECT * FROM wk_auth_requests WHERE id = ?1", id)
             .map_err(|_| AppError::Database)?
             .first(None)
             .await
@@ -196,7 +196,7 @@ impl AuthRequest {
     ) -> Result<Option<Self>, AppError> {
         let row: Option<Value> = d1_query!(
             db,
-            "SELECT * FROM auth_requests WHERE id = ?1 AND user_id = ?2",
+            "SELECT * FROM wk_auth_requests WHERE id = ?1 AND user_id = ?2",
             id,
             user_id
         )
@@ -219,7 +219,7 @@ impl AuthRequest {
 
         let rows: Vec<Value> = d1_query!(
             db,
-            "SELECT * FROM auth_requests
+            "SELECT * FROM wk_auth_requests
              WHERE user_id = ?1 AND approved IS NULL AND creation_date > ?2
              ORDER BY creation_date DESC",
             user_id,

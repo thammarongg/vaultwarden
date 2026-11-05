@@ -295,7 +295,7 @@ pub async fn user_has_push_device(env: &Env, user_id: &str) -> Result<bool, AppE
     let db = db::get_db_unconstrained(env)?;
     let count: Option<f64> = db
         .prepare(
-            "SELECT COUNT(*) as cnt FROM devices WHERE user_id = ?1 AND push_token IS NOT NULL AND push_uuid IS NOT NULL",
+            "SELECT COUNT(*) as cnt FROM devices WHERE user_uuid = ?1 AND push_token IS NOT NULL AND push_uuid IS NOT NULL",
         )
         .bind(&[user_id.into()])
         .map_err(AppError::Worker)?
@@ -312,7 +312,9 @@ pub async fn lookup_device_push_info(
 ) -> Result<Option<DevicePushInfo>, AppError> {
     let db = db::get_db_unconstrained(env)?;
     let row: Option<Value> = db
-        .prepare("SELECT push_uuid, identifier FROM devices WHERE identifier = ?1 AND user_id = ?2")
+        .prepare(
+            "SELECT push_uuid, uuid AS identifier FROM devices WHERE uuid = ?1 AND user_uuid = ?2",
+        )
         .bind(&[device_identifier.into(), user_id.into()])
         .map_err(AppError::Worker)?
         .first(None)
@@ -334,7 +336,7 @@ pub async fn unregister_push_devices_by_user(env: &Env, user_id: &str) {
     };
 
     let stmt = match db
-        .prepare("SELECT push_uuid FROM devices WHERE user_id = ?1 AND push_uuid IS NOT NULL")
+        .prepare("SELECT push_uuid FROM devices WHERE user_uuid = ?1 AND push_uuid IS NOT NULL")
         .bind(&[user_id.into()])
     {
         Ok(s) => s,

@@ -59,7 +59,7 @@ impl Device {
     pub async fn list_by_user(db: &crate::db::Db, user_id: &str) -> Result<Vec<Self>, AppError> {
         let rows: Vec<Value> = d1_query!(
             db,
-            "SELECT * FROM devices WHERE user_id = ?1 ORDER BY updated_at DESC, created_at DESC",
+            "SELECT * FROM wk_devices WHERE user_id = ?1 ORDER BY updated_at DESC, created_at DESC",
             user_id
         )
         .map_err(|_| AppError::Database)?
@@ -81,7 +81,7 @@ impl Device {
     ) -> Result<Option<Self>, AppError> {
         let row: Option<Value> = d1_query!(
             db,
-            "SELECT * FROM devices WHERE identifier = ?1 AND user_id = ?2",
+            "SELECT * FROM wk_devices WHERE identifier = ?1 AND user_id = ?2",
             identifier,
             user_id
         )
@@ -100,7 +100,7 @@ impl Device {
     ) -> Result<Option<Self>, AppError> {
         let row: Option<Value> = d1_query!(
             db,
-            "SELECT * FROM devices WHERE refresh_token = ?1",
+            "SELECT * FROM wk_devices WHERE refresh_token = ?1",
             refresh_token
         )
         .map_err(|_| AppError::Database)?
@@ -122,7 +122,7 @@ impl Device {
     pub async fn insert(&self, db: &crate::db::Db) -> Result<(), AppError> {
         d1_query!(
             db,
-            "INSERT INTO devices (identifier, user_id, name, type, push_uuid, push_token, refresh_token, twofactor_remember, created_at, updated_at)
+            "INSERT INTO devices (uuid, user_uuid, name, atype, push_uuid, push_token, refresh_token, twofactor_remember, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             &self.identifier,
             &self.user_id,
@@ -157,7 +157,7 @@ impl Device {
                 let now = db::now_string();
                 d1_query!(
                     db,
-                    "UPDATE devices SET name = ?1, type = ?2, updated_at = ?3 WHERE identifier = ?4 AND user_id = ?5",
+                    "UPDATE devices SET name = ?1, atype = ?2, updated_at = ?3 WHERE uuid = ?4 AND user_uuid = ?5",
                     &name,
                     r#type,
                     &now,
@@ -185,7 +185,7 @@ impl Device {
         let now = db::now_string();
         d1_query!(
             db,
-            "UPDATE devices SET updated_at = ?1 WHERE identifier = ?2 AND user_id = ?3",
+            "UPDATE devices SET updated_at = ?1 WHERE uuid = ?2 AND user_uuid = ?3",
             &now,
             &self.identifier,
             &self.user_id
@@ -206,7 +206,7 @@ impl Device {
         let now = db::now_string();
         d1_query!(
             db,
-            "UPDATE devices SET push_token = ?1, updated_at = ?2 WHERE identifier = ?3 AND user_id = ?4",
+            "UPDATE devices SET push_token = ?1, updated_at = ?2 WHERE uuid = ?3 AND user_uuid = ?4",
             push_token,
             &now,
             &self.identifier,
@@ -226,7 +226,7 @@ impl Device {
         let now = db::now_string();
         d1_query!(
             db,
-            "UPDATE devices SET push_uuid = ?1, updated_at = ?2 WHERE identifier = ?3 AND user_id = ?4",
+            "UPDATE devices SET push_uuid = ?1, updated_at = ?2 WHERE uuid = ?3 AND user_uuid = ?4",
             self.push_uuid.as_deref(),
             &now,
             &self.identifier,
@@ -249,7 +249,7 @@ impl Device {
         let now = db::now_string();
         d1_query!(
             db,
-            "UPDATE devices SET twofactor_remember = ?1, updated_at = ?2 WHERE identifier = ?3 AND user_id = ?4",
+            "UPDATE devices SET twofactor_remember = ?1, updated_at = ?2 WHERE uuid = ?3 AND user_uuid = ?4",
             twofactor_remember,
             &now,
             &self.identifier,
@@ -268,7 +268,7 @@ impl Device {
     /// Delete all device rows for a user, effectively revoking all refresh tokens and
     /// logging out every active session.
     pub async fn delete_all_by_user(db: &crate::db::Db, user_id: &str) -> Result<(), AppError> {
-        d1_query!(db, "DELETE FROM devices WHERE user_id = ?1", user_id)
+        d1_query!(db, "DELETE FROM devices WHERE user_uuid = ?1", user_id)
             .map_err(|_| AppError::Database)?
             .run()
             .await

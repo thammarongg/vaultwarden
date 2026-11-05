@@ -359,7 +359,7 @@ async fn authenticate_password_grant(
 
 async fn load_user_by_id(db: &crate::db::Db, user_id: &str) -> Result<User, AppError> {
     let user_value: Option<Value> = db
-        .prepare("SELECT * FROM users WHERE id = ?1")
+        .prepare(crate::models::user::select_user_by_id_sql())
         .bind(&[user_id.into()])?
         .first(None)
         .await
@@ -390,7 +390,7 @@ async fn maybe_upgrade_password_hash(
 
     d1_query!(
         db,
-        "UPDATE users SET master_password_hash = ?1, password_salt = ?2, password_iterations = ?3, updated_at = ?4 WHERE id = ?5",
+        "UPDATE users SET password_hash = unhex(?1), salt = unhex(?2), password_iterations = ?3, updated_at = ?4 WHERE uuid = ?5",
         &new_hash,
         &new_salt,
         desired_iterations,
@@ -687,7 +687,7 @@ pub async fn token(
                                 .map_err(|_| AppError::Database)?;
                             d1_query!(
                                 &db,
-                                "UPDATE users SET totp_recover = NULL WHERE id = ?1",
+                                "UPDATE users SET totp_recover = NULL WHERE uuid = ?1",
                                 &user.id
                             )
                             .map_err(|_| AppError::Database)?
@@ -696,7 +696,7 @@ pub async fn token(
                             .map_err(|_| AppError::Database)?;
                             d1_query!(
                                 &db,
-                                "UPDATE devices SET twofactor_remember = NULL WHERE user_id = ?1",
+                                "UPDATE devices SET twofactor_remember = NULL WHERE user_uuid = ?1",
                                 &user.id
                             )
                             .map_err(|_| AppError::Database)?

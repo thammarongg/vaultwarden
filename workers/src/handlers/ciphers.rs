@@ -38,7 +38,7 @@ async fn fetch_cipher_for_user(
     cipher_id: &str,
     user_id: &str,
 ) -> Result<CipherDBModel, AppError> {
-    db.prepare("SELECT * FROM ciphers WHERE id = ?1 AND user_id = ?2")
+    db.prepare("SELECT * FROM wk_ciphers WHERE id = ?1 AND user_id = ?2")
         .bind(&[cipher_id.to_string().into(), user_id.to_string().into()])?
         .first(None)
         .await
@@ -58,7 +58,7 @@ async fn validate_folder_ownership(
     };
 
     let folder_exists: Option<Value> = db
-        .prepare("SELECT id FROM folders WHERE id = ?1 AND user_id = ?2")
+        .prepare("SELECT uuid AS id FROM folders WHERE uuid = ?1 AND user_uuid = ?2")
         .bind(&[folder_id.to_string().into(), user_id.to_string().into()])?
         .first(None)
         .await?;
@@ -116,24 +116,22 @@ pub async fn create_cipher(
         attachments: None,
     };
 
-    let data = serde_json::to_string(&cipher.data).map_err(|_| AppError::Internal)?;
-
-    d1_query!(
-        &db,
-        "INSERT INTO ciphers (id, user_id, organization_id, type, data, favorite, folder_id, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-         cipher.id,
-         cipher.user_id,
-         cipher.organization_id,
-         cipher.r#type,
-         data,
-         cipher.favorite,
-
-         cipher.folder_id,
-         cipher.created_at,
-         cipher.updated_at,
-    ).map_err(|_|AppError::Database)?
-    .run()
+    db.batch(
+        crate::models::cipher::create_cipher_stmts(
+            &db,
+            &cipher.id,
+            &claims.sub,
+            cipher.organization_id.as_deref(),
+            cipher.r#type,
+            &cipher.data,
+            cipher.folder_id.as_deref(),
+            cipher.favorite,
+            None,
+            &cipher.created_at,
+            &cipher.updated_at,
+        )
+        .map_err(|_| AppError::Database)?,
+    )
     .await?;
 
     attachments::hydrate_cipher_attachments(&db, env.as_ref(), &mut cipher).await?;
@@ -173,7 +171,8 @@ pub async fn update_cipher(
                 Ok(server_dt) => {
                     if server_dt.signed_duration_since(client_dt).num_seconds() > 1 {
                         return Err(AppError::BadRequest(
-                            "The client copy of this cipher is out of date. Resync the client and try again.".to_string(),
+                            "The client copy of this cipher is out of date. Resync the client and try again."
+                                .to_string(),
                         ));
                     }
                 }
@@ -212,31 +211,39 @@ pub async fn update_cipher(
         attachments: None,
     };
 
-    let data = serde_json::to_string(&cipher.data).map_err(|_| AppError::Internal)?;
-
-    d1_query!(
-        &db,
-        "UPDATE ciphers SET organization_id = ?1, type = ?2, data = ?3, favorite = ?4, folder_id = ?5, updated_at = ?6 WHERE id = ?7 AND user_id = ?8",
-        cipher.organization_id,
-        cipher.r#type,
-        data,
-        cipher.favorite,
-        cipher.folder_id,
-        cipher.updated_at,
-        id,
-        claims.sub,
-    ).map_err(|_|AppError::Database)?
-    .run()
-    .await?;
+    {
+        use crate::models::cipher::{
+            set_favorite_stmts, set_folder_stmts, update_cipher_stmt, CipherColumns,
+        };
+        let cols = CipherColumns::from_blob(cipher.r#type, &cipher.data);
+        let mut stmts = vec![update_cipher_stmt(
+            &db,
+            &id,
+            &claims.sub,
+            cipher.organization_id.as_deref(),
+            cipher.r#type,
+            &cols,
+            &cipher.updated_at,
+        )
+        .map_err(|_| AppError::Database)?];
+        stmts.extend(
+            set_folder_stmts(&db, &id, &claims.sub, cipher.folder_id.as_deref())
+                .map_err(|_| AppError::Database)?,
+        );
+        stmts.extend(
+            set_favorite_stmts(&db, &id, &claims.sub, cipher.favorite)
+                .map_err(|_| AppError::Database)?,
+        );
+        db.batch(stmts).await?;
+    }
 
     if let Some(attachments2) = &payload.attachments2 {
         for (attachment_id, attachment) in attachments2 {
             let result = d1_query!(
                 &db,
-                "UPDATE attachments SET file_name = ?1, akey = ?2, updated_at = ?3 WHERE id = ?4 AND cipher_id = ?5",
+                "UPDATE attachments SET file_name = ?1, akey = ?2 WHERE id = ?3 AND cipher_uuid = ?4",
                 attachment.file_name,
                 attachment.key,
-                now,
                 attachment_id,
                 id
             )
@@ -331,18 +338,23 @@ pub async fn update_cipher_partial(
 
     let now = db::now_string();
 
-    d1_query!(
+    let mut stmts = vec![d1_query!(
         &db,
-        "UPDATE ciphers SET folder_id = ?1, favorite = ?2, updated_at = ?3 WHERE id = ?4 AND user_id = ?5",
-        payload.folder_id,
-        payload.favorite,
+        "UPDATE ciphers SET updated_at = ?1 WHERE uuid = ?2 AND user_uuid = ?3",
         now,
         id,
         user_id,
     )
-    .map_err(|_| AppError::Database)?
-    .run()
-    .await?;
+    .map_err(|_| AppError::Database)?];
+    stmts.extend(
+        crate::models::cipher::set_folder_stmts(&db, &id, user_id, payload.folder_id.as_deref())
+            .map_err(|_| AppError::Database)?,
+    );
+    stmts.extend(
+        crate::models::cipher::set_favorite_stmts(&db, &id, user_id, payload.favorite)
+            .map_err(|_| AppError::Database)?,
+    );
+    db.batch(stmts).await?;
 
     let now = db::now_string();
     db::touch_user_updated_at(&db, user_id, &now).await?;
@@ -369,7 +381,7 @@ pub async fn soft_delete_cipher(
 
     d1_query!(
         &db,
-        "UPDATE ciphers SET deleted_at = ?1, updated_at = ?1 WHERE id = ?2 AND user_id = ?3",
+        "UPDATE ciphers SET deleted_at = ?1, updated_at = ?1 WHERE uuid = ?2 AND user_uuid = ?3",
         now,
         id,
         claims.sub
@@ -406,7 +418,7 @@ pub async fn soft_delete_ciphers_bulk(
 
     d1_query!(
         &db,
-        "UPDATE ciphers SET deleted_at = ?1, updated_at = ?1 WHERE user_id = ?2 AND id IN (SELECT value FROM json_each(?3, '$.ids'))",
+        "UPDATE ciphers SET deleted_at = ?1, updated_at = ?1 WHERE user_uuid = ?2 AND uuid IN (SELECT value FROM json_each(?3, '$.ids'))",
         now,
         claims.sub,
         body
@@ -453,14 +465,14 @@ pub async fn hard_delete_cipher(
         attachments::delete_storage_objects(env.as_ref(), &keys).await?;
     }
 
-    d1_query!(
-        &db,
-        "DELETE FROM ciphers WHERE id = ?1 AND user_id = ?2",
-        id,
-        claims.sub
+    db.batch(
+        db::delete_ciphers_statements(
+            &db,
+            "uuid = ?1 AND user_uuid = ?2",
+            &[id.clone().into(), claims.sub.clone().into()],
+        )
+        .map_err(|_| AppError::Database)?,
     )
-    .map_err(|_| AppError::Database)?
-    .run()
     .await?;
 
     db::touch_user_updated_at(&db, &claims.sub, &now).await?;
@@ -500,14 +512,14 @@ pub async fn hard_delete_ciphers_bulk(
         attachments::delete_storage_objects(env.as_ref(), &keys).await?;
     }
 
-    d1_query!(
-        &db,
-        "DELETE FROM ciphers WHERE user_id = ?1 AND id IN (SELECT value FROM json_each(?2, '$.ids'))",
-        claims.sub,
-        body
+    db.batch(
+        db::delete_ciphers_statements(
+            &db,
+            "user_uuid = ?1 AND uuid IN (SELECT value FROM json_each(?2, '$.ids'))",
+            &[claims.sub.clone().into(), body.clone().into()],
+        )
+        .map_err(|_| AppError::Database)?,
     )
-    .map_err(|_| AppError::Database)?
-    .run()
     .await
     .map_err(db::map_d1_json_error)?;
 
@@ -539,7 +551,7 @@ pub async fn restore_cipher(
     // Update the cipher to clear deleted_at
     d1_query!(
         &db,
-        "UPDATE ciphers SET deleted_at = NULL, updated_at = ?1 WHERE id = ?2 AND user_id = ?3",
+        "UPDATE ciphers SET deleted_at = NULL, updated_at = ?1 WHERE uuid = ?2 AND user_uuid = ?3",
         now,
         id,
         claims.sub
@@ -581,7 +593,7 @@ pub async fn restore_ciphers_bulk(
     // Single bulk UPDATE using json_each() with path
     d1_query!(
         &db,
-        "UPDATE ciphers SET deleted_at = NULL, updated_at = ?1 WHERE user_id = ?2 AND id IN (SELECT value FROM json_each(?3, '$.ids'))",
+        "UPDATE ciphers SET deleted_at = NULL, updated_at = ?1 WHERE user_uuid = ?2 AND uuid IN (SELECT value FROM json_each(?3, '$.ids'))",
         now,
         claims.sub,
         body
@@ -621,21 +633,25 @@ pub async fn archive_cipher(
     let db = db::get_db(&env)?;
     fetch_cipher_for_user(&db, &id, &claims.sub).await.map_err(|_| {
         AppError::BadRequest(
-            "Cipher was not archived. Ensure the provided ID is correct and you have permission to archive it.".to_string(),
+            "Cipher was not archived. Ensure the provided ID is correct and you have permission to archive it."
+                .to_string(),
         )
     })?;
     let now = db::now_string();
 
-    d1_query!(
+    let mut stmts = vec![d1_query!(
         &db,
-        "UPDATE ciphers SET archived_at = ?1, updated_at = ?1 WHERE id = ?2 AND user_id = ?3",
+        "UPDATE ciphers SET updated_at = ?1 WHERE uuid = ?2 AND user_uuid = ?3",
         now,
         id,
         claims.sub
     )
-    .map_err(|_| AppError::Database)?
-    .run()
-    .await?;
+    .map_err(|_| AppError::Database)?];
+    stmts.extend(
+        crate::models::cipher::set_archived_stmts(&db, &id, &claims.sub, Some(&now))
+            .map_err(|_| AppError::Database)?,
+    );
+    db.batch(stmts).await?;
 
     let updated = fetch_cipher_for_user(&db, &id, &claims.sub).await?;
     let mut cipher: Cipher = updated.into();
@@ -665,21 +681,25 @@ pub async fn unarchive_cipher(
     let db = db::get_db(&env)?;
     fetch_cipher_for_user(&db, &id, &claims.sub).await.map_err(|_| {
         AppError::BadRequest(
-            "Cipher was not unarchived. Ensure the provided ID is correct and you have permission to unarchive it.".to_string(),
+            "Cipher was not unarchived. Ensure the provided ID is correct and you have permission to unarchive it."
+                .to_string(),
         )
     })?;
     let now = db::now_string();
 
-    d1_query!(
+    let mut stmts = vec![d1_query!(
         &db,
-        "UPDATE ciphers SET archived_at = NULL, updated_at = ?1 WHERE id = ?2 AND user_id = ?3",
+        "UPDATE ciphers SET updated_at = ?1 WHERE uuid = ?2 AND user_uuid = ?3",
         now,
         id,
         claims.sub
     )
-    .map_err(|_| AppError::Database)?
-    .run()
-    .await?;
+    .map_err(|_| AppError::Database)?];
+    stmts.extend(
+        crate::models::cipher::set_archived_stmts(&db, &id, &claims.sub, None)
+            .map_err(|_| AppError::Database)?,
+    );
+    db.batch(stmts).await?;
 
     let updated = fetch_cipher_for_user(&db, &id, &claims.sub).await?;
     let mut cipher: Cipher = updated.into();
@@ -710,15 +730,25 @@ pub async fn archive_ciphers_bulk(
     let db = db::get_db(&env)?;
     let now = db::now_string();
 
-    d1_query!(
-        &db,
-        "UPDATE ciphers SET archived_at = ?1, updated_at = ?1 WHERE user_id = ?2 AND id IN (SELECT value FROM json_each(?3, '$.ids'))",
-        now,
-        claims.sub,
-        body
-    )
-    .map_err(|_| AppError::Database)?
-    .run()
+    db.batch(vec![
+        d1_query!(
+            &db,
+            "UPDATE ciphers SET updated_at = ?1 WHERE user_uuid = ?2 AND uuid IN (SELECT value FROM json_each(?3, '$.ids'))",
+            now,
+            claims.sub,
+            body
+        )
+        .map_err(|_| AppError::Database)?,
+        d1_query!(
+            &db,
+            "INSERT OR REPLACE INTO archives (user_uuid, cipher_uuid, archived_at)
+             SELECT ?2, uuid, ?1 FROM ciphers WHERE user_uuid = ?2 AND uuid IN (SELECT value FROM json_each(?3, '$.ids'))",
+            now,
+            claims.sub,
+            body
+        )
+        .map_err(|_| AppError::Database)?,
+    ])
     .await
     .map_err(db::map_d1_json_error)?;
 
@@ -753,15 +783,23 @@ pub async fn unarchive_ciphers_bulk(
     let db = db::get_db(&env)?;
     let now = db::now_string();
 
-    d1_query!(
-        &db,
-        "UPDATE ciphers SET archived_at = NULL, updated_at = ?1 WHERE user_id = ?2 AND id IN (SELECT value FROM json_each(?3, '$.ids'))",
-        now,
-        claims.sub,
-        body
-    )
-    .map_err(|_| AppError::Database)?
-    .run()
+    db.batch(vec![
+        d1_query!(
+            &db,
+            "UPDATE ciphers SET updated_at = ?1 WHERE user_uuid = ?2 AND uuid IN (SELECT value FROM json_each(?3, '$.ids'))",
+            now,
+            claims.sub,
+            body
+        )
+        .map_err(|_| AppError::Database)?,
+        d1_query!(
+            &db,
+            "DELETE FROM archives WHERE user_uuid = ?1 AND cipher_uuid IN (SELECT value FROM json_each(?2, '$.ids'))",
+            claims.sub,
+            body
+        )
+        .map_err(|_| AppError::Database)?,
+    ])
     .await
     .map_err(db::map_d1_json_error)?;
 
@@ -823,23 +861,22 @@ pub async fn create_cipher_simple(
         attachments: None,
     };
 
-    let data = serde_json::to_string(&cipher.data).map_err(|_| AppError::Internal)?;
-
-    d1_query!(
-        &db,
-        "INSERT INTO ciphers (id, user_id, organization_id, type, data, favorite, folder_id, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-         cipher.id,
-         cipher.user_id,
-         cipher.organization_id,
-         cipher.r#type,
-         data,
-         cipher.favorite,
-         cipher.folder_id,
-         cipher.created_at,
-         cipher.updated_at,
-    ).map_err(|_| AppError::Database)?
-    .run()
+    db.batch(
+        crate::models::cipher::create_cipher_stmts(
+            &db,
+            &cipher.id,
+            &claims.sub,
+            cipher.organization_id.as_deref(),
+            cipher.r#type,
+            &cipher.data,
+            cipher.folder_id.as_deref(),
+            cipher.favorite,
+            None,
+            &cipher.created_at,
+            &cipher.updated_at,
+        )
+        .map_err(|_| AppError::Database)?,
+    )
     .await?;
 
     attachments::hydrate_cipher_attachments(&db, env.as_ref(), &mut cipher).await?;
@@ -878,7 +915,7 @@ pub async fn move_cipher_selected(
         .prepare(
             "SELECT 1 WHERE NULLIF(json_extract(?1, '$.folderId'), '') IS NOT NULL 
              AND NOT EXISTS (
-                 SELECT 1 FROM folders WHERE id = NULLIF(json_extract(?1, '$.folderId'), '') AND user_id = ?2
+                 SELECT 1 FROM folders WHERE uuid = NULLIF(json_extract(?1, '$.folderId'), '') AND user_uuid = ?2
              )",
         )
         .bind(&[body.clone().into(), user_id.clone().into()])?
@@ -894,12 +931,26 @@ pub async fn move_cipher_selected(
 
     // Update folder_id for all ciphers that belong to the user and are in the ids list
     // Uses json_extract for folderId and json_each for ids array
-    db.prepare(
-        "UPDATE ciphers SET folder_id = NULLIF(json_extract(?1, '$.folderId'), ''), updated_at = ?2 
-         WHERE user_id = ?3 AND id IN (SELECT value FROM json_each(?1, '$.ids'))",
-    )
-    .bind(&[body.into(), now.clone().into(), user_id.clone().into()])?
-    .run()
+    let binds = [body.into(), now.clone().into(), user_id.clone().into()];
+    db.batch(vec![
+        db.prepare(
+            "DELETE FROM folders_ciphers
+             WHERE cipher_uuid IN (SELECT uuid FROM ciphers WHERE user_uuid = ?3 AND uuid IN (SELECT value FROM json_each(?1, '$.ids')))
+               AND folder_uuid IN (SELECT uuid FROM folders WHERE user_uuid = ?3)",
+        )
+        .bind(&binds)?,
+        db.prepare(
+            "INSERT INTO folders_ciphers (cipher_uuid, folder_uuid)
+             SELECT uuid, NULLIF(json_extract(?1, '$.folderId'), '') FROM ciphers
+             WHERE user_uuid = ?3 AND uuid IN (SELECT value FROM json_each(?1, '$.ids'))
+               AND NULLIF(json_extract(?1, '$.folderId'), '') IS NOT NULL",
+        )
+        .bind(&binds)?,
+        db.prepare(
+            "UPDATE ciphers SET updated_at = ?2 WHERE user_uuid = ?3 AND uuid IN (SELECT value FROM json_each(?1, '$.ids'))",
+        )
+        .bind(&binds)?,
+    ])
     .await
     .map_err(db::map_d1_json_error)?;
 
@@ -933,7 +984,7 @@ pub async fn purge_vault(
 
     // Get the user from the database
     let user: Value = db
-        .prepare("SELECT * FROM users WHERE id = ?1")
+        .prepare(crate::models::user::select_user_by_id_sql())
         .bind(&[user_id.clone().into()])?
         .first(None)
         .await
@@ -957,17 +1008,19 @@ pub async fn purge_vault(
         attachments::delete_storage_objects(env.as_ref(), &keys).await?;
     }
 
-    // Delete all user's ciphers (both active and soft-deleted)
-    d1_query!(&db, "DELETE FROM ciphers WHERE user_id = ?1", user_id)
-        .map_err(|_| AppError::Database)?
-        .run()
-        .await?;
-
-    // Delete all user's folders
-    d1_query!(&db, "DELETE FROM folders WHERE user_id = ?1", user_id)
-        .map_err(|_| AppError::Database)?
-        .run()
-        .await?;
+    // Delete all user's ciphers (both active and soft-deleted) and folders
+    let binds = [user_id.clone().into()];
+    let mut stmts = db::delete_ciphers_statements(&db, "user_uuid = ?1", &binds)
+        .map_err(|_| AppError::Database)?;
+    for sql in [
+        "DELETE FROM folders_ciphers WHERE folder_uuid IN (SELECT uuid FROM folders WHERE user_uuid = ?1)",
+        "DELETE FROM favorites WHERE user_uuid = ?1",
+        "DELETE FROM archives WHERE user_uuid = ?1",
+        "DELETE FROM folders WHERE user_uuid = ?1",
+    ] {
+        stmts.push(db.prepare(sql).bind(&binds)?);
+    }
+    db.batch(stmts).await?;
 
     // Update user's revision date to trigger client sync
     let now = db::now_string();
@@ -1013,7 +1066,7 @@ fn cipher_json_expr(attachments_enabled: bool) -> String {
                     )
                 ) END
                 FROM attachments a
-                WHERE a.cipher_id = c.id
+                WHERE a.cipher_uuid = c.id
             )
         "
     } else {
@@ -1070,7 +1123,7 @@ fn cipher_json_array_sql(
         "SELECT COALESCE(json_group_array(json(sub.cipher_json)), '[]') AS ciphers_json
         FROM (
             SELECT {cipher_expr} AS cipher_json
-            FROM ciphers c
+            FROM wk_ciphers c
             {where_clause}
             {order_clause}
         ) sub",
@@ -1088,7 +1141,7 @@ fn cipher_json_rows_sql(
     let cipher_expr = cipher_json_expr(attachments_enabled);
     format!(
         "SELECT {cipher_expr} AS cipher_json
-        FROM ciphers c
+        FROM wk_ciphers c
         {where_clause}
         {order_clause}",
         cipher_expr = cipher_expr,

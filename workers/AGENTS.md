@@ -2,7 +2,8 @@
 
 ## Overview
 Warden is a minimal, Bitwarden-compatible backend that runs on Cloudflare Workers (inspired by Vaultwarden).
-This repository does **not** reuse Vaultwarden code: `vaultwarden/` is for reference only.
+This crate lives in a vaultwarden fork (AGPL-3.0); porting logic from the parent crate (`../src`) is intended.
+The D1 schema mirrors vaultwarden's SQLite schema (see "Database schema" below).
 The bundled web UI is shipped as prebuilt artifacts under `public/web-vault/`.
 It typically should not be edited.
 Unsupported/"won't implement" features are listed in `README.md`.
@@ -15,7 +16,7 @@ Unsupported/"won't implement" features are listed in `README.md`.
     - `HeavyDo` directly reuses the existing Axum router/handlers stack (no duplicated business logic) to offload CPU-heavy endpoints.
     - `NotifyDo` for websocket notifications.
 - `src/entry.js`: Wrangler entrypoint (routing + R2 attachment streaming + optional DO offload).
-- `migrations/`: D1 migrations applied via Wrangler.
+- `migrations/`: incremental D1 migrations on top of `sql/schema.sql` (none yet).
 - `sql/`: base schema (`sql/schema.sql`) and optional seed SQL.
 - `scripts/`: helper scripts (apply web-vault overrides, seed equivalent domains).
 - `docs/`: deployment and D1 backup/restore playbooks.
@@ -49,3 +50,12 @@ Avoid Cloudflare bindings/network.
 - Do not commit secrets.
   Use `.env` locally and Cloudflare/GitHub Secrets for deploy:
   `JWT_SECRET`, `JWT_REFRESH_SECRET`, `D1_DATABASE_ID`.
+
+## Database schema
+- `sql/schema.sql` section 1 is vaultwarden's SQLite schema verbatim (regenerate from `../migrations/sqlite`; never hand-edit). `bash tests/schema_check.sh` must pass.
+- Section 2: Workers-only tables (`attachments_pending`, `sends_pending`, `global_equivalent_domains`), indexes, and read-only `wk_*` views that expose vaultwarden tables in the Rust models' field names.
+- Read through `wk_*` views (or `USER_COLS` / `FOLDER_COLS`); write to the real tables with vaultwarden column names (`uuid`, `user_uuid`, `atype`, `akey`, ...).
+- Ciphers: the Rust side keeps one JSON blob; `models::cipher::CipherColumns::from_blob` splits it into vaultwarden's columns. Favorite/folder/archive live in `favorites` / `folders_ciphers` / `archives` (use the `set_*_stmts` helpers).
+- D1 enforces foreign keys and vaultwarden has no cascades: delete through `db::delete_ciphers_statements` / `db::delete_user_rows`.
+- Stored formats: BOOLEAN 0/1, password hashes/salts as BLOB (hex in Rust, `unhex()`/`hex()` in SQL). DATETIME stays ISO-8601 (`YYYY-MM-DDTHH:MM:SS.sssZ`), unlike diesel; an importer must convert.
+- Tests: `bash tests/run_local.sh` (local wrangler dev + `tests/smoke.py`, ~7 min because of login rate limits).

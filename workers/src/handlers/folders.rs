@@ -21,7 +21,10 @@ pub async fn list_folders(
     let db = db::get_db(&env)?;
 
     let folders_db: Vec<Folder> = db
-        .prepare("SELECT * FROM folders WHERE user_id = ?1")
+        .prepare(format!(
+            "SELECT {} FROM folders WHERE user_uuid = ?1",
+            crate::models::folder::FOLDER_COLS
+        ))
         .bind(&[claims.sub.clone().into()])?
         .all()
         .await?
@@ -47,7 +50,10 @@ pub async fn get_folder(
 
     let folder: Folder = d1_query!(
         &db,
-        "SELECT * FROM folders WHERE id = ?1 AND user_id = ?2",
+        format!(
+            "SELECT {} FROM folders WHERE uuid = ?1 AND user_uuid = ?2",
+            crate::models::folder::FOLDER_COLS
+        ),
         &id,
         &claims.sub
     )
@@ -82,7 +88,7 @@ pub async fn create_folder(
 
     d1_query!(
         &db,
-        "INSERT INTO folders (id, user_id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO folders (uuid, user_uuid, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
         folder.id,
         folder.user_id,
         folder.name,
@@ -123,14 +129,23 @@ pub async fn delete_folder(
     let db = db::get_db(&env)?;
     let now = db::now_string();
 
-    d1_query!(
-        &db,
-        "DELETE FROM folders WHERE id = ?1 AND user_id = ?2",
-        id,
-        claims.sub
-    )
-    .map_err(|_| AppError::Database)?
-    .run()
+    // Ciphers in the folder become folder-less (vaultwarden: FolderCipher rows are removed first).
+    db.batch(vec![
+        d1_query!(
+            &db,
+            "DELETE FROM folders_ciphers WHERE folder_uuid = ?1 AND folder_uuid IN (SELECT uuid FROM folders WHERE uuid = ?1 AND user_uuid = ?2)",
+            id,
+            claims.sub
+        )
+        .map_err(|_| AppError::Database)?,
+        d1_query!(
+            &db,
+            "DELETE FROM folders WHERE uuid = ?1 AND user_uuid = ?2",
+            id,
+            claims.sub
+        )
+        .map_err(|_| AppError::Database)?,
+    ])
     .await?;
 
     touch_user_updated_at(&db, &claims.sub, &now).await?;
@@ -158,7 +173,10 @@ pub async fn update_folder(
 
     let existing_folder: Folder = d1_query!(
         &db,
-        "SELECT * FROM folders WHERE id = ?1 AND user_id = ?2",
+        format!(
+            "SELECT {} FROM folders WHERE uuid = ?1 AND user_uuid = ?2",
+            crate::models::folder::FOLDER_COLS
+        ),
         id,
         claims.sub
     )
@@ -177,7 +195,7 @@ pub async fn update_folder(
 
     d1_query!(
         &db,
-        "UPDATE folders SET name = ?1, updated_at = ?2 WHERE id = ?3 AND user_id = ?4",
+        "UPDATE folders SET name = ?1, updated_at = ?2 WHERE uuid = ?3 AND user_uuid = ?4",
         folder.name,
         folder.updated_at,
         folder.id,

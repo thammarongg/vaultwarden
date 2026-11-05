@@ -232,7 +232,7 @@ async fn resolve_creator_identifier(db: &crate::db::Db, send: &SendDB) -> Option
     struct EmailRow {
         email: String,
     }
-    db.prepare("SELECT email FROM users WHERE id = ?1")
+    db.prepare("SELECT email FROM users WHERE uuid = ?1")
         .bind(&[send.user_id.clone().into()])
         .ok()?
         .first::<EmailRow>(None)
@@ -922,7 +922,7 @@ pub async fn rotate_user_sends(
 
         let stmt = d1_query!(
             db,
-            "UPDATE sends SET name = ?1, notes = ?2, data = ?3, akey = ?4, updated_at = ?5 WHERE id = ?6 AND user_id = ?7",
+            "UPDATE sends SET name = ?1, notes = ?2, data = ?3, akey = ?4, revision_date = ?5 WHERE uuid = ?6 AND user_uuid = ?7",
             send_data.name,
             send_data.notes,
             data,

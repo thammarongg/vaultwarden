@@ -92,7 +92,7 @@ pub async fn get_known_device(
     let db = db::get_db(&env)?;
 
     let user_id: Option<String> = db
-        .prepare("SELECT id FROM users WHERE email = ?1")
+        .prepare("SELECT uuid AS id FROM users WHERE email = ?1")
         .bind(&[email.into()])?
         .first(Some("id"))
         .await

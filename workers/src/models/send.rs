@@ -89,8 +89,6 @@ impl SendDB {
     pub async fn set_password(&mut self, password: Option<&str>) -> Result<(), AppError> {
         match password.filter(|p| !p.is_empty()) {
             Some(pw) => {
-                use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-
                 let mut salt_bytes = [0u8; 16];
                 getrandom::fill(&mut salt_bytes)
                     .map_err(|_| AppError::Crypto("RNG failed".into()))?;
@@ -103,8 +101,9 @@ impl SendDB {
                 )
                 .await?;
 
-                self.password_hash = Some(URL_SAFE_NO_PAD.encode(&dk));
-                self.password_salt = Some(URL_SAFE_NO_PAD.encode(salt_bytes));
+                // Hex here; stored as raw BLOB via SQL unhex() (vaultwarden layout).
+                self.password_hash = Some(hex::encode(&dk));
+                self.password_salt = Some(hex::encode(salt_bytes));
                 self.password_iter = Some(SEND_PBKDF2_ITERATIONS as i32);
             }
             None => {
@@ -118,7 +117,6 @@ impl SendDB {
 
     /// Verify a password against the stored hash.
     pub async fn check_password(&self, password: &str) -> Result<bool, AppError> {
-        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
         use constant_time_eq::constant_time_eq;
 
         let (Some(hash), Some(salt), Some(iter)) =
@@ -127,9 +125,8 @@ impl SendDB {
             return Ok(false);
         };
 
-        let salt_bytes = URL_SAFE_NO_PAD
-            .decode(salt)
-            .map_err(|_| AppError::Crypto("Invalid password salt".into()))?;
+        let salt_bytes =
+            hex::decode(salt).map_err(|_| AppError::Crypto("Invalid password salt".into()))?;
 
         let dk = crate::crypto::webcrypto_pbkdf2_sha256(
             password.as_bytes(),
@@ -139,7 +136,7 @@ impl SendDB {
         )
         .await?;
 
-        let computed = URL_SAFE_NO_PAD.encode(&dk);
+        let computed = hex::encode(&dk);
         Ok(constant_time_eq(computed.as_bytes(), hash.as_bytes()))
     }
 
@@ -255,7 +252,11 @@ impl SendDB {
             "deletionDate": self.deletion_date,
             "disabled": self.disabled != 0,
             "hideEmail": self.hide_email != 0,
-            "password": self.password_hash,
+            // API exposes the hash base64url-encoded (as vaultwarden does).
+            "password": self.password_hash.as_deref().and_then(|h| hex::decode(h).ok()).map(|b| {
+                use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+                URL_SAFE_NO_PAD.encode(b)
+            }),
             "authType": if self.password_hash.is_some() { SendAuthType::Password as i32 } else { SendAuthType::None as i32 },
             "object": "send",
         })
@@ -286,7 +287,7 @@ impl SendDB {
     pub async fn insert(&self, db: &crate::db::Db) -> Result<(), AppError> {
         d1_query!(
             db,
-            "INSERT INTO sends (id, user_id, name, notes, type, data, akey, password_hash, password_salt, password_iter, max_access_count, access_count, created_at, updated_at, expiration_date, deletion_date, disabled, hide_email) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            "INSERT INTO sends (uuid, user_uuid, name, notes, atype, data, akey, password_hash, password_salt, password_iter, max_access_count, access_count, creation_date, revision_date, expiration_date, deletion_date, disabled, hide_email) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, unhex(?8), unhex(?9), ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             self.id,
             self.user_id,
             self.name,
@@ -316,7 +317,7 @@ impl SendDB {
         self.updated_at = db::now_string();
         d1_query!(
             db,
-            "UPDATE sends SET name = ?1, notes = ?2, data = ?3, akey = ?4, password_hash = ?5, password_salt = ?6, password_iter = ?7, max_access_count = ?8, expiration_date = ?9, deletion_date = ?10, disabled = ?11, hide_email = ?12, updated_at = ?13 WHERE id = ?14 AND user_id = ?15",
+            "UPDATE sends SET name = ?1, notes = ?2, data = ?3, akey = ?4, password_hash = unhex(?5), password_salt = unhex(?6), password_iter = ?7, max_access_count = ?8, expiration_date = ?9, deletion_date = ?10, disabled = ?11, hide_email = ?12, revision_date = ?13 WHERE uuid = ?14 AND user_uuid = ?15",
             self.name,
             self.notes,
             self.data,
@@ -342,7 +343,7 @@ impl SendDB {
     pub async fn delete(&self, db: &crate::db::Db) -> Result<(), AppError> {
         d1_query!(
             db,
-            "DELETE FROM sends WHERE id = ?1 AND user_id = ?2",
+            "DELETE FROM sends WHERE uuid = ?1 AND user_uuid = ?2",
             self.id,
             self.user_id
         )
@@ -357,7 +358,7 @@ impl SendDB {
         self.updated_at = db::now_string();
         d1_query!(
             db,
-            "UPDATE sends SET access_count = ?1, updated_at = ?2 WHERE id = ?3",
+            "UPDATE sends SET access_count = ?1, revision_date = ?2 WHERE uuid = ?3",
             self.access_count,
             self.updated_at,
             self.id
@@ -371,7 +372,7 @@ impl SendDB {
     // ── Finders (sends table) ───────────────────────────────────────
 
     pub async fn find_by_id(db: &crate::db::Db, id: &str) -> Result<Option<Self>, AppError> {
-        db.prepare("SELECT * FROM sends WHERE id = ?1")
+        db.prepare("SELECT * FROM wk_sends WHERE id = ?1")
             .bind(&[id.into()])?
             .first(None)
             .await
@@ -383,7 +384,7 @@ impl SendDB {
         id: &str,
         user_id: &str,
     ) -> Result<Option<Self>, AppError> {
-        db.prepare("SELECT * FROM sends WHERE id = ?1 AND user_id = ?2")
+        db.prepare("SELECT * FROM wk_sends WHERE id = ?1 AND user_id = ?2")
             .bind(&[id.into(), user_id.into()])?
             .first(None)
             .await
@@ -401,7 +402,7 @@ impl SendDB {
     }
 
     pub async fn find_by_user(db: &crate::db::Db, user_id: &str) -> Result<Vec<Self>, AppError> {
-        db.prepare("SELECT * FROM sends WHERE user_id = ?1")
+        db.prepare("SELECT * FROM wk_sends WHERE user_id = ?1")
             .bind(&[user_id.into()])?
             .all()
             .await
@@ -412,7 +413,7 @@ impl SendDB {
 
     pub async fn find_expired(db: &crate::db::Db) -> Result<Vec<Self>, AppError> {
         let now = db::now_string();
-        db.prepare("SELECT * FROM sends WHERE deletion_date <= ?1")
+        db.prepare("SELECT * FROM wk_sends WHERE deletion_date <= ?1")
             .bind(&[now.into()])?
             .all()
             .await
@@ -435,7 +436,7 @@ impl SendDB {
             .unwrap_or(0);
 
         let finalized: Option<Value> = db
-            .prepare("SELECT COALESCE(SUM(CAST(json_extract(data, '$.size') AS INTEGER)), 0) as total FROM sends WHERE user_id = ?1 AND type = 1")
+            .prepare("SELECT COALESCE(SUM(CAST(json_extract(data, '$.size') AS INTEGER)), 0) as total FROM sends WHERE user_uuid = ?1 AND atype = 1")
             .bind(&[user_id.into()])?
             .first(None)
             .await
@@ -453,7 +454,7 @@ impl SendDB {
             .map_err(|_| AppError::Database)?
             .run()
             .await?;
-        d1_query!(db, "DELETE FROM sends WHERE user_id = ?1", user_id)
+        d1_query!(db, "DELETE FROM sends WHERE user_uuid = ?1", user_id)
             .map_err(|_| AppError::Database)?
             .run()
             .await?;
@@ -527,7 +528,7 @@ impl SendDB {
 
         let insert_stmt = d1_query!(
             db,
-            "INSERT INTO sends (id, user_id, name, notes, type, data, akey, password_hash, password_salt, password_iter, max_access_count, access_count, created_at, updated_at, expiration_date, deletion_date, disabled, hide_email) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            "INSERT INTO sends (uuid, user_uuid, name, notes, atype, data, akey, password_hash, password_salt, password_iter, max_access_count, access_count, creation_date, revision_date, expiration_date, deletion_date, disabled, hide_email) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, unhex(?8), unhex(?9), ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             self.id,
             self.user_id,
             self.name,

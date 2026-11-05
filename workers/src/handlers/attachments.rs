@@ -139,7 +139,7 @@ pub(crate) async fn touch_cipher_updated_at(
 ) -> Result<(), AppError> {
     d1_query!(
         db,
-        "UPDATE ciphers SET updated_at = ?1 WHERE id = ?2",
+        "UPDATE ciphers SET updated_at = ?1 WHERE uuid = ?2",
         now,
         cipher_id
     )
@@ -360,15 +360,13 @@ pub async fn upload_attachment_legacy(
 
     d1_query!(
         &db,
-        "INSERT INTO attachments (id, cipher_id, file_name, file_size, akey, created_at, updated_at, organization_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)",
+        "INSERT INTO attachments (id, cipher_uuid, file_name, file_size, akey)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
         attachment_id,
         cipher.id,
         file_name,
         actual_size,
         key,
-        now,
-        cipher.organization_id,
     )
     .map_err(|_| AppError::Database)?
     .run()
@@ -581,12 +579,12 @@ pub(crate) async fn list_attachment_keys_for_cipher_ids_json(
     ids_path: &str,
     user_id: Option<&str>,
 ) -> Result<Vec<String>, AppError> {
-    let mut sql = "SELECT a.cipher_id, a.id FROM attachments a JOIN ciphers c ON a.cipher_id = c.id WHERE c.id IN (SELECT value FROM json_each(?1, ?2))".to_string();
+    let mut sql = "SELECT a.cipher_uuid AS cipher_id, a.id FROM attachments a JOIN ciphers c ON a.cipher_uuid = c.uuid WHERE c.uuid IN (SELECT value FROM json_each(?1, ?2))".to_string();
     let mut params: Vec<worker::wasm_bindgen::JsValue> =
         vec![json_body.to_owned().into(), ids_path.to_owned().into()];
 
     if let Some(uid) = user_id {
-        sql.push_str(" AND c.user_id = ?3");
+        sql.push_str(" AND c.user_uuid = ?3");
         params.push(uid.into());
     }
 
@@ -608,9 +606,9 @@ pub(crate) async fn list_attachment_keys_for_user(
 ) -> Result<Vec<String>, AppError> {
     let rows: Vec<AttachmentKeyRow> = db
         .prepare(
-            "SELECT a.cipher_id, a.id FROM attachments a \
-             JOIN ciphers c ON a.cipher_id = c.id \
-             WHERE c.user_id = ?1",
+            "SELECT a.cipher_uuid AS cipher_id, a.id FROM attachments a \
+             JOIN ciphers c ON a.cipher_uuid = c.uuid \
+             WHERE c.user_uuid = ?1",
         )
         .bind(&[user_id.into()])?
         .all()
@@ -628,8 +626,8 @@ pub(crate) async fn list_attachment_keys_for_soft_deleted_before(
 ) -> Result<Vec<String>, AppError> {
     let rows: Vec<AttachmentKeyRow> = db
         .prepare(
-            "SELECT a.cipher_id, a.id FROM attachments a \
-             JOIN ciphers c ON a.cipher_id = c.id \
+            "SELECT a.cipher_uuid AS cipher_id, a.id FROM attachments a \
+             JOIN ciphers c ON a.cipher_uuid = c.uuid \
              WHERE c.deleted_at IS NOT NULL AND c.deleted_at < ?1",
         )
         .bind(&[cutoff_exclusive.into()])?
@@ -648,7 +646,7 @@ pub(crate) async fn ensure_cipher_for_user(
     user_id: &str,
 ) -> Result<CipherDBModel, AppError> {
     let cipher: Option<CipherDBModel> = db
-        .prepare("SELECT * FROM ciphers WHERE id = ?1 AND user_id = ?2")
+        .prepare("SELECT * FROM wk_ciphers WHERE id = ?1 AND user_id = ?2")
         .bind(&[cipher_id.into(), user_id.into()])?
         .first(None)
         .await
@@ -673,7 +671,7 @@ pub(crate) async fn fetch_attachment(
     db: &crate::db::Db,
     attachment_id: &str,
 ) -> Result<AttachmentDB, AppError> {
-    db.prepare("SELECT * FROM attachments WHERE id = ?1")
+    db.prepare("SELECT * FROM wk_attachments WHERE id = ?1")
         .bind(&[attachment_id.into()])?
         .first(None)
         .await
@@ -700,7 +698,7 @@ async fn load_attachment_map_json(
 ) -> Result<HashMap<String, Vec<AttachmentResponse>>, AppError> {
     let attachments: Vec<AttachmentDB> = db
         .prepare(
-            "SELECT * FROM attachments WHERE cipher_id IN (SELECT value FROM json_each(?1, ?2))",
+            "SELECT * FROM wk_attachments WHERE cipher_id IN (SELECT value FROM json_each(?1, ?2))",
         )
         .bind(&[json_body.to_owned().into(), ids_path.to_owned().into()])?
         .all()
@@ -960,13 +958,13 @@ async fn user_attachment_usage(
             "SELECT COALESCE(SUM(file_size), 0) as total FROM (
                 SELECT a.file_size AS file_size
                 FROM attachments a
-                JOIN ciphers c ON c.id = a.cipher_id
-                WHERE c.user_id = ?1 AND a.id != ?2
+                JOIN ciphers c ON c.uuid = a.cipher_uuid
+                WHERE c.user_uuid = ?1 AND a.id != ?2
                 UNION ALL
                 SELECT p.file_size AS file_size
                 FROM attachments_pending p
-                JOIN ciphers c2 ON c2.id = p.cipher_id
-                WHERE c2.user_id = ?1 AND p.id != ?2
+                JOIN ciphers c2 ON c2.uuid = p.cipher_id
+                WHERE c2.user_uuid = ?1 AND p.id != ?2
             ) AS files"
                 .to_string(),
             vec![JsValue::from_str(user_id), JsValue::from_str(id)],
@@ -976,13 +974,13 @@ async fn user_attachment_usage(
             "SELECT COALESCE(SUM(file_size), 0) as total FROM (
                 SELECT a.file_size AS file_size
                 FROM attachments a
-                JOIN ciphers c ON c.id = a.cipher_id
-                WHERE c.user_id = ?1
+                JOIN ciphers c ON c.uuid = a.cipher_uuid
+                WHERE c.user_uuid = ?1
                 UNION ALL
                 SELECT p.file_size AS file_size
                 FROM attachments_pending p
-                JOIN ciphers c2 ON c2.id = p.cipher_id
-                WHERE c2.user_id = ?1
+                JOIN ciphers c2 ON c2.uuid = p.cipher_id
+                WHERE c2.user_uuid = ?1
             ) AS files"
                 .to_string(),
             vec![JsValue::from_str(user_id)],

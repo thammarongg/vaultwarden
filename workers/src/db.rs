@@ -81,13 +81,79 @@ pub fn now_string() -> String {
 pub async fn touch_user_updated_at(db: &Db, user_id: &str, now: &str) -> Result<(), AppError> {
     d1_query!(
         db,
-        "UPDATE users SET updated_at = ?1 WHERE id = ?2",
+        "UPDATE users SET updated_at = ?1 WHERE uuid = ?2",
         now,
         user_id
     )
     .map_err(|_| AppError::Database)?
     .run()
     .await?;
+    Ok(())
+}
+
+/// Child tables that reference `ciphers(uuid)` without ON DELETE CASCADE (vaultwarden schema).
+/// `(table, column)` pairs.
+const CIPHER_CHILD_TABLES: &[(&str, &str)] = &[
+    ("attachments", "cipher_uuid"),
+    ("attachments_pending", "cipher_id"),
+    ("folders_ciphers", "cipher_uuid"),
+    ("favorites", "cipher_uuid"),
+    ("archives", "cipher_uuid"),
+    ("ciphers_collections", "cipher_uuid"),
+];
+
+/// Statements that delete the ciphers matching `cond` (SQL over `ciphers` columns, using
+/// `?1..?n` placeholders) together with their child rows, children first. D1 enforces foreign
+/// keys and the vaultwarden schema has no cascades, so callers must use this instead of a bare
+/// `DELETE FROM ciphers`. Run the result with `db.batch(...)` (atomic).
+pub fn delete_ciphers_statements(
+    db: &Db,
+    cond: &str,
+    binds: &[wasm_bindgen::JsValue],
+) -> Result<Vec<D1PreparedStatement>, Error> {
+    let mut out = Vec::with_capacity(CIPHER_CHILD_TABLES.len() + 1);
+    for (table, column) in CIPHER_CHILD_TABLES {
+        out.push(
+            db.prepare(format!(
+                "DELETE FROM {table} WHERE {column} IN (SELECT uuid FROM ciphers WHERE {cond})"
+            ))
+            .bind(binds)?,
+        );
+    }
+    out.push(
+        db.prepare(format!("DELETE FROM ciphers WHERE {cond}"))
+            .bind(binds)?,
+    );
+    Ok(out)
+}
+
+/// Delete a user and every row that references it (vaultwarden schema, no cascades).
+/// Storage objects (R2/KV) must be removed by the caller beforehand.
+pub async fn delete_user_rows(db: &Db, user_id: &str) -> Result<(), AppError> {
+    let uid: wasm_bindgen::JsValue = user_id.into();
+    let binds = [uid.clone()];
+    let mut stmts = delete_ciphers_statements(db, "user_uuid = ?1", &binds)?;
+    for sql in [
+        "DELETE FROM folders_ciphers WHERE folder_uuid IN (SELECT uuid FROM folders WHERE user_uuid = ?1)",
+        "DELETE FROM favorites WHERE user_uuid = ?1",
+        "DELETE FROM archives WHERE user_uuid = ?1",
+        "DELETE FROM folders WHERE user_uuid = ?1",
+        "DELETE FROM sends_pending WHERE user_id = ?1",
+        "DELETE FROM sends WHERE user_uuid = ?1",
+        "DELETE FROM auth_requests WHERE user_uuid = ?1",
+        "DELETE FROM devices WHERE user_uuid = ?1",
+        "DELETE FROM twofactor WHERE user_uuid = ?1",
+        "DELETE FROM twofactor_incomplete WHERE user_uuid = ?1",
+        "DELETE FROM emergency_access WHERE grantor_uuid = ?1 OR grantee_uuid = ?1",
+        "DELETE FROM users_collections WHERE user_uuid = ?1",
+        "DELETE FROM groups_users WHERE users_organizations_uuid IN (SELECT uuid FROM users_organizations WHERE user_uuid = ?1)",
+        "DELETE FROM users_organizations WHERE user_uuid = ?1",
+        "DELETE FROM sso_users WHERE user_uuid = ?1",
+        "DELETE FROM users WHERE uuid = ?1",
+    ] {
+        stmts.push(db.prepare(sql).bind(&binds)?);
+    }
+    db.batch(stmts).await?;
     Ok(())
 }
 

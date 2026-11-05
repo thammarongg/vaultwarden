@@ -119,7 +119,7 @@ pub async fn get_domains(claims: Claims, State(env): State<Arc<Env>>) -> Result<
     let db = db::get_db(&env)?;
 
     let row: Option<Value> = db
-        .prepare("SELECT equivalent_domains, excluded_globals FROM users WHERE id = ?1")
+        .prepare("SELECT equivalent_domains, excluded_globals FROM users WHERE uuid = ?1")
         .bind(&[claims.sub.into()])?
         .first(None)
         .await
@@ -179,7 +179,7 @@ pub async fn post_domains(
     let now = db::now_string();
     d1_query!(
         &db,
-        "UPDATE users SET equivalent_domains = ?1, excluded_globals = ?2, updated_at = ?3 WHERE id = ?4",
+        "UPDATE users SET equivalent_domains = ?1, excluded_globals = ?2, updated_at = ?3 WHERE uuid = ?4",
         equivalent_domains_json,
         excluded_globals_json,
         now,
