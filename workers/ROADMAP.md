@@ -16,7 +16,7 @@ is the reference implementation for porting features.
 - D1: `vaultwarden-cf` (binding `vault1`, APAC)
 - R2: `vaultwarden-cf-attachments` (binding `ATTACHMENTS_BUCKET`)
 - Durable Objects: `HeavyDo` (CPU offload), `NotifyDo` (WebSocket live sync)
-- Secrets: `JWT_SECRET`, `JWT_REFRESH_SECRET`, `ALLOWED_EMAILS`
+- Secrets: `JWT_SECRET`, `JWT_REFRESH_SECRET`, `ALLOWED_EMAILS`, `RESEND_API_KEY` (mail on)
 - Web vault: bw_web_builds `v2026.6.4` downloaded into `public/web-vault/` (not committed)
 
 ## Phases
@@ -26,8 +26,8 @@ is the reference implementation for porting features.
 2. **Import from vaultwarden** — script that reads a vaultwarden SQLite file
    (`db.sqlite3`) and writes D1 SQL. Needs a column-by-column map between
    `../migrations/sqlite` (final schema) and `sql/schema.sql`.
-3. **Organizations / Collections / Sharing** (team use, full vaultwarden parity) — done locally
-   (branch `phase3-orgs`), pending web-vault check and deploy.
+3. **Organizations / Collections / Sharing** (team use, full vaultwarden parity) — done,
+   deployed 2026-11-05 (version `3255ea7c`), checked in the real web vault.
    Reference: `../src/api/core/organizations.rs`, `../src/api/core/ciphers.rs`,
    `../src/db/models/{organization,collection,group,org_policy,cipher}.rs`.
    - 3.1 Orgs, collections, org ciphers (create/share/collections/org-details/admin aliases/purge),
@@ -54,9 +54,9 @@ is the reference implementation for porting features.
    when a policy revokes a member; events are not recorded.
 
 4. **Emergency access, Admin page, more 2FA** — `../src/api/core/emergency_access.rs`,
-   `../src/api/admin.rs`, `../src/api/core/two_factor/*`. Email 2FA and invites need
-   an email sender (Cloudflare Email Service `send_email` binding); WebAuthn needs a
-   wasm-compatible verifier.
+   `../src/api/admin.rs`, `../src/api/core/two_factor/*`. Mail is available (`src/mail.rs`,
+   Resend); WebAuthn/passkey 2FA needs a wasm-compatible verifier; Duo/YubiKey call external
+   APIs.
 
 ## Decisions
 
@@ -69,9 +69,10 @@ is the reference implementation for porting features.
 
 - Port vaultwarden #7563 (2FA userVerificationToken) before moving the web vault past
   v2026.6.4 (web vault 2026.7.1+ needs it to toggle 2FA).
-- Port #7837 (delete auth requests with the user — done by `db::delete_user_rows`),
-  #7450 (attachment v2 quota), #7777 (don't leak internal errors to clients).
-- `cargo update -p ctutils -p tokio` (RUSTSEC-2026-0385/0386).
+- Port #7450 (attachment v2 quota), #7777 (don't leak internal errors to clients; D1
+  error text currently reaches clients on 500s). #7837 done (`db::delete_user_rows`).
+- Phase 3 gaps: org attachments not counted against a quota; no "removed from org" email
+  when a policy revokes a member; events not recorded (endpoints return empty lists).
 
 ## Open decisions
 
