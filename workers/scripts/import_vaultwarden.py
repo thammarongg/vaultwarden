@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""Import a vaultwarden instance (db.sqlite3 + data folder) into the Workers D1/R2 deployment.
+
+Reads vaultwarden's SQLite database and writes:
+  * a SQL file for `wrangler d1 execute <db> --remote --file <out.sql>`, and
+  * a shell script that uploads attachment and Send files to R2 with `wrangler r2 object put`.
+
+Section 1 of sql/schema.sql mirrors vaultwarden's schema, so rows are copied table by table.
+Only two things change: DATETIME/TIMESTAMP values become ISO-8601 UTC ('YYYY-MM-DDTHH:MM:SS.sssZ',
+what the Worker stores), and session-like tables (devices, auth requests, incomplete 2FA logins,
+SSO auth state) are skipped: users log in again after the move (JWT secrets differ anyway).
+
+The import is meant for an empty database. Use --wipe to prepend DELETEs for every imported
+table (this destroys whatever the target holds; take a backup first).
+
+Python 3 stdlib only. Never reads or prints secrets beyond what is copied into the output files,
+which contain the (encrypted) vault and must be treated as sensitive.
+"""
+
+import argparse
+import os
+import re
+import shlex
+import sqlite3
+import sys
+from collections import defaultdict
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SCHEMA = os.path.join(HERE, "..", "sql", "schema.sql")
+
+# Tables never copied: transient sessions/state and diesel's bookkeeping.
+SKIP_TABLES = {
+    "__diesel_schema_migrations",
+    "devices",
+    "auth_requests",
+    "twofactor_incomplete",
+    "twofactor_duo_ctx",
+    "sso_auth",
+}
+# Remember-device tokens are bound to devices, which are not imported.
+SKIP_TWOFACTOR_TYPES = {5}  # TwoFactorType::Remember
+
+DIESEL_DT = re.compile(r"^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]00:?00)?$")
+
+
+def to_iso(value):
+    """diesel 'YYYY-MM-DD HH:MM:SS[.ffffff]' -> 'YYYY-MM-DDTHH:MM:SS.sssZ' (unchanged if not a date)."""
+    if not isinstance(value, str):
+        return value
+    m = DIESEL_DT.match(value.strip())
+    if not m:
+        return value
+    frac = (m.group(3) or "0")[:3].ljust(3, "0")
+    return f"{m.group(1)}T{m.group(2)}.{frac}Z"
+
+
+def sql_literal(value):
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return "X'" + bytes(value).hex() + "'"
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def target_schema():
+    """Tables of section 1 of sql/schema.sql: {table: [(column, declared_type)]} and FK edges."""
+    with open(SCHEMA, encoding="utf-8") as f:
+        ddl = f.read()
+    section1 = ddl.split("Section 2: Workers-only")[0]
+    mem = sqlite3.connect(":memory:")
+    mem.executescript(section1)
+    tables, deps = {}, defaultdict(set)
+    for (name,) in mem.execute("SELECT name FROM sqlite_master WHERE type='table'"):
+        if name in SKIP_TABLES or name.startswith("sqlite_"):
+            continue
+        tables[name] = [(r[1], (r[2] or "").upper()) for r in mem.execute(f'PRAGMA table_info("{name}")')]
+        for fk in mem.execute(f'PRAGMA foreign_key_list("{name}")'):
+            if fk[2] != name:
+                deps[name].add(fk[2])
+    return tables, deps
+
+
+def fk_order(tables, deps):
+    order, done = [], set()
+
+    def visit(t, stack=()):
+        if t in done or t not in tables:
+            return
+        if t in stack:
+            raise SystemExit(f"foreign key cycle at {t}")
+        for d in sorted(deps.get(t, ())):
+            visit(d, stack + (t,))
+        done.add(t)
+        order.append(t)
+
+    for t in sorted(tables):
+        visit(t)
+    return order
+
+
+def source_columns(src, table):
+    try:
+        return [r[1] for r in src.execute(f'PRAGMA table_info("{table}")')]
+    except sqlite3.DatabaseError:
+        return []
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--db", required=True, help="vaultwarden db.sqlite3 (stop vaultwarden or use a copy)")
+    ap.add_argument("--data-dir", help="vaultwarden data folder (attachments/, sends/); default: the db's folder")
+    ap.add_argument("--out", default="vaultwarden-import.sql", help="SQL output file")
+    ap.add_argument("--r2-script", default="vaultwarden-import-r2.sh", help="R2 upload script output")
+    ap.add_argument("--bucket", default="vaultwarden-cf-attachments", help="R2 bucket name")
+    ap.add_argument("--r2-flags", default="--remote", help="extra flags for `wrangler r2 object put` (e.g. --local)")
+    ap.add_argument("--wipe", action="store_true", help="prepend DELETEs of every imported table (destructive)")
+    args = ap.parse_args()
+
+    data_dir = args.data_dir or os.path.dirname(os.path.abspath(args.db))
+    src = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
+    src.row_factory = sqlite3.Row
+
+    tables, deps = target_schema()
+    order = fk_order(tables, deps)
+
+    out = [
+        "-- Generated by scripts/import_vaultwarden.py from a vaultwarden db.sqlite3.",
+        "-- Contains the encrypted vault: keep it private and delete it after importing.",
+        "PRAGMA defer_foreign_keys = on;",
+    ]
+    if args.wipe:
+        out.append("-- --wipe: remove existing rows first (children before parents).")
+        for t in reversed(order):
+            out.append(f'DELETE FROM "{t}";')
+        out.append('DELETE FROM attachments_pending;')
+        out.append('DELETE FROM sends_pending;')
+
+    counts, missing = {}, []
+    for t in order:
+        have = set(source_columns(src, t))
+        if not have:
+            missing.append(t)
+            continue
+        cols = [(c, ty) for c, ty in tables[t] if c in have]
+        names = ", ".join(f'"{c}"' for c, _ in cols)
+        where = ""
+        if t == "twofactor":
+            where = f" WHERE atype NOT IN ({', '.join(map(str, SKIP_TWOFACTOR_TYPES))})"
+        n = 0
+        for row in src.execute(f'SELECT {names} FROM "{t}"{where}'):
+            vals = []
+            for (c, ty), v in zip(cols, row):
+                if ("DATE" in ty or "TIME" in ty) and isinstance(v, str):
+                    v = to_iso(v)
+                vals.append(sql_literal(v))
+            out.append(f'INSERT INTO "{t}" ({names}) VALUES ({", ".join(vals)});')
+            n += 1
+        counts[t] = n
+
+    with open(args.out, "w", encoding="utf-8") as f:
+        f.write("\n".join(out) + "\n")
+    os.chmod(args.out, 0o600)
+
+    # Files: attachments/<cipher>/<id> -> <cipher>/<id>; sends/<send>/<file> -> sends/<send>/<file>.
+    uploads, absent = [], []
+    for r in src.execute("SELECT id, cipher_uuid FROM attachments"):
+        uploads.append((os.path.join(data_dir, "attachments", r["cipher_uuid"], r["id"]), f"{r['cipher_uuid']}/{r['id']}"))
+    import json
+    for r in src.execute("SELECT uuid, data FROM sends WHERE atype = 1"):
+        try:
+            file_id = json.loads(r["data"]).get("id")
+        except (TypeError, ValueError):
+            file_id = None
+        if file_id:
+            uploads.append((os.path.join(data_dir, "sends", r["uuid"], file_id), f"sends/{r['uuid']}/{file_id}"))
+    lines = ["#!/usr/bin/env bash", "# Generated by scripts/import_vaultwarden.py: upload vaultwarden files to R2.", "set -euo pipefail"]
+    for path, key in uploads:
+        if not os.path.isfile(path):
+            absent.append(path)
+            continue
+        lines.append(
+            f"npx -y wrangler r2 object put {shlex.quote(args.bucket + '/' + key)} --file {shlex.quote(path)} {args.r2_flags}"
+        )
+    with open(args.r2_script, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    os.chmod(args.r2_script, 0o700)
+
+    total = sum(counts.values())
+    print(f"SQL: {args.out} ({total} rows)")
+    for t in order:
+        if counts.get(t):
+            print(f"  {t}: {counts[t]}")
+    if missing:
+        print(f"  not in source (older vaultwarden?): {', '.join(missing)}")
+    print(f"R2 script: {args.r2_script} ({len(uploads) - len(absent)} files)")
+    for p in absent:
+        print(f"  WARNING: file missing on disk: {p}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

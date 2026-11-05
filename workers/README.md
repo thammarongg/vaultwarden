@@ -270,6 +270,34 @@ The worker runs a scheduled task to clean up soft-deleted items. By default, it 
   - Import a backup locally: `wrangler d1 execute vault1 --file=backup.sql`
   - Inspect local DB: SQLite file under `.wrangler/state/v3/d1/`
 
+## Migrating from vaultwarden
+
+`scripts/import_vaultwarden.py` moves a whole vaultwarden instance: users (same master
+passwords), personal and organization items, folders, collections, groups, policies, Sends,
+2FA settings and emergency contacts, plus attachment and Send files (to R2). Devices and login
+sessions are not copied, so every client logs in again once.
+
+1. Stop vaultwarden (or copy its `data/` folder while it is stopped), and take a D1 backup.
+2. Generate the import (Python 3, stdlib only):
+
+```bash
+python3 scripts/import_vaultwarden.py --db /path/to/data/db.sqlite3 --data-dir /path/to/data --out import.sql --r2-script import-r2.sh
+```
+
+3. Load it into an empty D1 database (add `--wipe` in step 2 to clear existing rows first;
+   that deletes everything already there) and upload the files:
+
+```bash
+npx wrangler d1 execute vaultwarden-cf --remote --file import.sql
+bash import-r2.sh
+```
+
+4. Delete `import.sql` and `import-r2.sh` afterwards: they contain the (encrypted) vault.
+
+Emails being imported must be allowed to log in only if they are in `ALLOWED_EMAILS` for new
+registrations; existing accounts log in regardless. `tests/import_check.sh` runs the whole flow
+against a real vaultwarden in docker.
+
 ## Local Development with D1
 
 Run the Worker locally with D1 support using Wrangler.

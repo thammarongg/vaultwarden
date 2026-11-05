@@ -23,9 +23,9 @@ is the reference implementation for porting features.
 
 1. **Base on workers.dev** — done. Personal vault, folders, attachments (R2),
    Send, devices, TOTP 2FA, live sync.
-2. **Import from vaultwarden** — script that reads a vaultwarden SQLite file
-   (`db.sqlite3`) and writes D1 SQL. Needs a column-by-column map between
-   `../migrations/sqlite` (final schema) and `sql/schema.sql`.
+2. **Import from vaultwarden** — done: `scripts/import_vaultwarden.py` (see README "Migrating
+   from vaultwarden"); checked end to end against a real vaultwarden 1.37.5 by
+   `tests/import_check.sh` (docker).
 3. **Organizations / Collections / Sharing** (team use, full vaultwarden parity) — done,
    deployed 2026-11-05 (version `3255ea7c`), checked in the real web vault.
    Reference: `../src/api/core/organizations.rs`, `../src/api/core/ciphers.rs`,
