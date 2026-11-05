@@ -12,7 +12,7 @@ is the reference implementation for porting features.
 
 ## Deployment (current)
 
-- Worker: `vaultwarden-cf` → https://vaultwarden-cf.thammarongg-personal-account.workers.dev
+- Worker: `vaultwarden-cf` → https://vault.asdevwishes.com (custom domain; workers.dev disabled)
 - D1: `vaultwarden-cf` (binding `vault1`, APAC)
 - R2: `vaultwarden-cf-attachments` (binding `ATTACHMENTS_BUCKET`)
 - Durable Objects: `HeavyDo` (CPU offload), `NotifyDo` (WebSocket live sync)
